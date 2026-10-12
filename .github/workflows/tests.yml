@@ -1,1 +1,38 @@
+name: Offline test suite
 
+# Runs the offline unit tests against the stub genlayer SDK in
+# tests/genlayer_stub on every push and pull request, once against the
+# documented contract.py and once against the stripped contract_deploy.py.
+# It also fails when contract_deploy.py is out of date with contract.py.
+# No network access or live GenLayer node is needed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Deploy file is up to date
+        run: |
+          python3 tools/make_deploy.py contract.py "$RUNNER_TEMP/regenerated.py"
+          diff contract_deploy.py "$RUNNER_TEMP/regenerated.py"
+
+      - name: Test contract.py
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Test contract_deploy.py
+        run: python3 -m unittest discover -s tests -v
+        env:
+          ND_CONTRACT: ${{ github.workspace }}/contract_deploy.py
