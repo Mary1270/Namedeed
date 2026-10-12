@@ -1,0 +1,707 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NameDeed</title>
+<meta name="description" content="Escrow and dispute resolution for domain name sales on GenLayer.">
+<style>
+:root{
+  --paper:#eaeff3; --card:#f8fafb; --ink:#14212c; --muted:#546576; --line:#cbd5de;
+  --signal:#1f4fd8; --signal-ink:#ffffff; --good:#12724a; --bad:#b3261e; --warn:#8a5a00;
+  --zone:#0f1b26; --zone-ink:#cfe3f2; --zone-key:#7fd0b0;
+  --radius:10px;
+}
+@media (prefers-color-scheme:dark){
+  :root{--paper:#0c141b; --card:#13202b; --ink:#e6eef5; --muted:#8ea1b3; --line:#243646;
+    --signal:#6f93ff; --signal-ink:#08121d; --good:#58d19a; --bad:#ff8a80; --warn:#f0c060;
+    --zone:#070d12; --zone-ink:#cfe3f2; --zone-key:#7fd0b0;}
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 "Avenir Next","Segoe UI",system-ui,sans-serif;padding-bottom:84px}
+a{color:inherit}
+.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:.88em;word-break:break-all}
+header.top{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--paper);z-index:5}
+.brand{font-weight:800;letter-spacing:-.02em;font-size:1.25rem;text-decoration:none}
+.brand i{font-style:normal;color:var(--signal)}
+button,.btn{font:inherit;font-weight:600;border:0;border-radius:8px;padding:11px 16px;background:var(--signal);color:var(--signal-ink);cursor:pointer;min-height:44px}
+button.secondary{background:transparent;color:var(--ink);border:1.5px solid var(--ink)}
+button.danger{background:transparent;color:var(--bad);border:1.5px solid var(--bad)}
+button.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
+button:disabled{opacity:.5;cursor:default}
+:focus-visible{outline:3px solid var(--signal);outline-offset:2px}
+main{max-width:720px;margin:0 auto;padding:16px}
+.route{display:none}.route.active{display:block}
+h1{font-size:1.6rem;line-height:1.15;letter-spacing:-.02em;margin:8px 0 6px}
+h2{font-size:1.25rem;margin:0 0 8px;letter-spacing:-.01em}
+h3{font-size:1.02rem;margin:0 0 6px}
+p{margin:0 0 10px;max-width:68ch}
+.hint{color:var(--muted);font-size:.92rem}
+.faint{color:var(--muted);font-size:.88rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px;margin:0 0 12px}
+a.card{display:block;text-decoration:none}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.pill{display:inline-block;border-radius:99px;padding:2px 10px;font-size:.82rem;font-weight:700;border:1.5px solid currentColor}
+.pill.good{color:var(--good)}.pill.bad{color:var(--bad)}.pill.warn{color:var(--warn)}.pill.open{color:var(--signal)}.pill.neutral{color:var(--muted)}
+label{display:block;font-weight:600;margin:12px 0 4px;font-size:.93rem}
+input,textarea,select{width:100%;font:inherit;padding:11px;border-radius:8px;border:1.5px solid var(--line);background:var(--paper);color:var(--ink)}
+textarea{min-height:92px;resize:vertical}
+.out{display:none;margin-top:10px;padding:10px;border-radius:8px;background:var(--paper);border:1px solid var(--line);white-space:pre-wrap;word-break:break-word;font-size:.9rem}
+.out.ok{border-color:var(--good)}.out.err{border-color:var(--bad)}
+dl.kv{display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;margin:10px 0 0}
+dl.kv dt{color:var(--muted);font-size:.9rem}dl.kv dd{margin:0;min-width:0}
+.zone{background:var(--zone);color:var(--zone-ink);border-radius:var(--radius);padding:14px;margin:0 0 12px}
+.zone .cap{color:#8ea1b3;font-size:.85rem;margin-bottom:8px}
+.zone .line{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.86rem;word-break:break-all;line-height:1.6}
+.zone .k{color:var(--zone-key)}
+.zone button{margin-top:10px;background:#1c3042;color:var(--zone-ink);min-height:38px;padding:7px 12px}
+.obs{border:1.5px solid var(--line);border-radius:var(--radius);padding:10px;background:var(--card);min-height:84px}
+.obs.done{border-color:var(--good)}.obs.wait{border-style:dashed}
+.facts{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:8px 0 0}
+.fact{font-size:.88rem;padding:6px 8px;border-radius:6px;border:1px solid var(--line)}
+.fact.y{border-color:var(--good);color:var(--good)}.fact.n{color:var(--muted)}
+.verdict{border-radius:var(--radius);padding:14px;margin:0 0 12px;border:2px solid var(--line);background:var(--card)}
+.verdict .big{font-size:1.35rem;font-weight:800;letter-spacing:-.01em}
+.verdict.good{border-color:var(--good)}.verdict.bad{border-color:var(--bad)}.verdict.warn{border-color:var(--warn)}
+.empty{padding:26px 8px;text-align:center;color:var(--muted)}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--signal);border-radius:50%;animation:s 1s linear infinite;margin-right:8px;vertical-align:-2px}
+@keyframes s{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--paper);border-top:1px solid var(--line);z-index:6}
+nav.tabs div{display:flex;max-width:720px;margin:0 auto}
+nav.tabs a{flex:1;text-align:center;padding:12px 4px 14px;text-decoration:none;color:var(--muted);font-weight:600;font-size:.92rem}
+nav.tabs a.active{color:var(--signal);box-shadow:inset 0 3px 0 var(--signal)}
+.sheet{position:fixed;inset:0;background:rgba(5,10,15,.6);display:flex;align-items:flex-end;justify-content:center;z-index:20}
+.sheet[hidden]{display:none}
+.sheet .panel{background:var(--card);width:100%;max-width:720px;border-radius:16px 16px 0 0;padding:16px;max-height:88vh;overflow:auto}
+.chips{display:flex;gap:6px;flex-wrap:wrap}.chip{border:1px solid var(--line);border-radius:6px;padding:2px 8px;font-size:.85rem}
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/">Name<i>Deed</i></a>
+  <button id="walletPill" class="secondary" type="button">Connect wallet</button>
+</header>
+
+<main>
+  <section id="route-home" class="route">
+    <h1>Domain sales, held in escrow</h1>
+    <p class="hint">The buyer escrows the price and the seller posts a bond. The seller proves control with a DNS record, then moves the domain. Validators read the registry (RDAP) and public DNS to decide who gets paid.</p>
+    <div class="row" style="margin:12px 0">
+      <input id="filterInput" placeholder="Filter by domain, address or status" style="flex:1;min-width:0">
+      <button id="refreshBtn" class="ghost" type="button">Refresh</button>
+    </div>
+    <div id="deedList"></div>
+    <div style="text-align:center"><button id="moreBtn" class="ghost" type="button" hidden>Load older deeds</button></div>
+  </section>
+
+  <section id="route-create" class="route">
+    <h1>Open a deed</h1>
+    <p class="hint">You are the buyer. The GEN you send is the price, held until the handover is proven.</p>
+    <div class="card">
+      <label for="fSeller">Seller wallet address</label>
+      <input id="fSeller" placeholder="0x…" autocapitalize="off" spellcheck="false">
+      <label for="fDomain">Domain</label>
+      <input id="fDomain" placeholder="example.com" autocapitalize="off" spellcheck="false">
+      <label for="fRegistrar">Your registrar's IANA ID (recommended)</label>
+      <input id="fRegistrar" placeholder="e.g. 292" inputmode="numeric">
+      <p class="hint">Fill this in when the seller transfers the domain to your registrar. The handover is then proven by the registry itself and the seller cannot quietly take it back. Leave it empty only for a nameserver-only handover.</p>
+      <label for="fNs">Nameservers the domain must use</label>
+      <textarea id="fNs" placeholder="ns1.your-dns.net, ns2.your-dns.net" spellcheck="false" autocapitalize="off"></textarea>
+      <p class="hint">At least two, comma separated. Checked against the registry when no registrar ID is given.</p>
+      <label for="fRdap">RDAP host</label>
+      <select id="fRdap">
+        <option value="rdap.verisign.com">rdap.verisign.com (.com, .net)</option>
+        <option value="rdap.publicinterestregistry.org">rdap.publicinterestregistry.org (.org)</option>
+      </select>
+      <label for="fDeadline">Handover deadline</label>
+      <input id="fDeadline" type="datetime-local">
+      <label for="fGap">Hours a proof must hold</label>
+      <input id="fGap" type="number" min="1" max="72" value="1" inputmode="numeric">
+      <p class="hint">A handover only counts once it has been seen in observations at least this many hours apart.</p>
+      <label for="fTerms">Handover terms</label>
+      <textarea id="fTerms" placeholder="What the seller must hand over, in plain words"></textarea>
+      <label for="fStake">Price (GEN)</label>
+      <input id="fStake" inputmode="decimal" placeholder="10">
+      <label for="fBond">Seller bond (GEN)</label>
+      <input id="fBond" inputmode="decimal" placeholder="1">
+      <p class="hint">What the seller must post to accept. The seller loses it if the handover fails.</p>
+      <div style="margin-top:14px"><button id="createBtn" type="button">Open deed and stake</button></div>
+      <div id="createOut" class="out"></div>
+    </div>
+  </section>
+
+  <section id="route-deed" class="route"><div id="deedView"></div></section>
+
+  <section id="route-jury" class="route">
+    <h1>Jury</h1>
+    <p class="hint">Stake GEN to become eligible for appeal panels. Jurors who vote with a verified majority earn from slashed stakes; non-revealers are slashed.</p>
+    <div class="card">
+      <label for="jStake">Stake to add (GEN)</label>
+      <input id="jStake" inputmode="decimal" placeholder="1">
+      <div style="margin-top:10px"><button id="jRegisterBtn" type="button">Stake as juror</button></div>
+      <label for="jUnstake">Amount to unstake (GEN)</label>
+      <input id="jUnstake" inputmode="decimal" placeholder="0.5">
+      <div style="margin-top:10px"><button id="jUnstakeBtn" class="secondary" type="button">Unstake</button></div>
+      <div id="jOut" class="out"></div>
+    </div>
+    <div class="card">
+      <h3>Look up a juror</h3>
+      <input id="jAddr" placeholder="Address (empty uses your wallet)" autocapitalize="off" spellcheck="false">
+      <div style="margin-top:10px"><button id="jLookupBtn" class="ghost" type="button">Look up</button></div>
+      <div id="jLookupOut" class="out"></div>
+    </div>
+  </section>
+
+  <section id="route-withdraw" class="route">
+    <h1>Balance</h1>
+    <p class="hint">Payouts, refunds and rewards are credited here. Nothing is sent until you withdraw.</p>
+    <div class="card">
+      <div class="row"><span>Your withdrawable balance</span><b id="myPending">connect wallet</b></div>
+      <div style="margin-top:12px" class="row">
+        <button id="withdrawBtn" type="button">Withdraw</button>
+        <button id="checkPendingBtn" class="ghost" type="button">Refresh</button>
+      </div>
+      <div id="wOut" class="out"></div>
+    </div>
+    <div class="card">
+      <h3>Check another address</h3>
+      <input id="wAddr" placeholder="0x…" autocapitalize="off" spellcheck="false">
+      <div style="margin-top:10px"><button id="wLookupBtn" class="ghost" type="button">Check</button></div>
+      <div id="wLookupOut" class="out"></div>
+    </div>
+    <div class="card"><div class="row"><span class="faint">Contract holds</span><b id="contractBal">—</b></div></div>
+  </section>
+</main>
+
+<div id="walletSheet" class="sheet" hidden>
+  <div class="panel" role="dialog" aria-modal="true" aria-label="Wallet and contract">
+    <div class="row"><h2>Wallet</h2><button id="sheetClose" class="ghost" type="button">Close</button></div>
+    <p class="hint">Use a browser wallet, paste a Studio private key, or start a throwaway test session.</p>
+    <div class="row" style="justify-content:flex-start"><button id="connInjected" type="button">Browser wallet</button><button id="connTest" class="secondary" type="button">Test session</button></div>
+    <label for="pkInput">Private key (stays in this tab)</label>
+    <input id="pkInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="0x…">
+    <div style="margin-top:10px"><button id="connKey" class="secondary" type="button">Use key</button></div>
+    <label for="addrInput">Contract address</label>
+    <input id="addrInput" autocapitalize="off" spellcheck="false" placeholder="0x…">
+    <div style="margin-top:10px"><button id="saveAddr" class="ghost" type="button">Save address in this browser</button></div>
+    <div id="connOut" class="out"></div>
+    <div style="margin-top:12px"><button id="connDisconnect" class="danger" type="button" hidden>Disconnect</button></div>
+  </div>
+</div>
+
+<nav class="tabs"><div>
+  <a class="tab-link" data-tab="home" href="#/">Explore</a>
+  <a class="tab-link" data-tab="create" href="#/create">Open</a>
+  <a class="tab-link" data-tab="jury" href="#/jury">Jury</a>
+  <a class="tab-link" data-tab="withdraw" href="#/withdraw">Balance</a>
+</div></nav>
+
+<script type="module">
+import { createClient, createAccount } from "https://esm.sh/genlayer-js@latest";
+import { studionet } from "https://esm.sh/genlayer-js@latest/chains";
+
+const DEFAULT_CONTRACT = "0x0000000000000000000000000000000000000000";
+let CONTRACT_ADDRESS = DEFAULT_CONTRACT;
+try { const saved = localStorage.getItem("namedeed:contract"); if (/^0x[0-9a-fA-F]{40}$/.test(saved || "")) CONTRACT_ADDRESS = saved; } catch (e) {}
+const OUTCOMES = ["HANDOVER_COMPLETE", "PARTIAL_HANDOVER", "HANDOVER_FAILED", "UNDETERMINED"];
+const PAGE = 20;
+const $ = (id) => document.getElementById(id);
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    el.appendChild(typeof kid === "string" || typeof kid === "number" ? document.createTextNode(String(kid)) : kid);
+  }
+  return el;
+}
+const clear = (el) => { while (el.firstChild) el.removeChild(el.firstChild); return el; };
+const short = (a) => (a ? a.slice(0, 6) + "…" + a.slice(-4) : "—");
+const same = (a, b) => !!a && !!b && String(a).toLowerCase() === String(b).toLowerCase();
+const fmtTime = (iso) => { try { return new Date(iso).toLocaleString(); } catch (e) { return String(iso); } };
+const ts = (iso) => { try { return new Date(iso).getTime(); } catch (e) { return NaN; } };
+const isPast = (iso) => Date.now() > ts(iso);
+function showOut(el, text, kind) {
+  el.style.display = "block";
+  el.textContent = typeof text === "string" ? text : JSON.stringify(text, null, 2);
+  el.classList.remove("ok", "err");
+  if (kind) el.classList.add(kind);
+}
+function fmtDuration(ms) {
+  const m = Math.max(0, Math.ceil(ms / 60000));
+  if (m < 60) return m + " min";
+  const hrs = Math.floor(m / 60);
+  return hrs < 48 ? `${hrs} h ${m % 60} min` : `${Math.floor(hrs / 24)} d ${hrs % 24} h`;
+}
+
+const WEI_PER_GEN = 1000000000000000000n;
+function genToWei(s) {
+  const t = String(s).trim();
+  if (!t) return null;
+  const p = t.split(".");
+  if (p.length > 2) return null;
+  const whole = p[0] || "0";
+  const frac = p[1] || "";
+  if (!/^\d+$/.test(whole) || (frac && !/^\d+$/.test(frac)) || frac.length > 18) return null;
+  try { return BigInt(whole) * WEI_PER_GEN + BigInt(frac.padEnd(18, "0") || "0"); } catch (e) { return null; }
+}
+function weiToGen(w) {
+  let wei;
+  try { wei = BigInt(w); } catch (e) { return String(w); }
+  const frac = (wei % WEI_PER_GEN).toString().padStart(18, "0").replace(/0+$/, "");
+  return frac ? `${wei / WEI_PER_GEN}.${frac}` : (wei / WEI_PER_GEN).toString();
+}
+
+/* ---------- wallet ---------- */
+let client = null, account = null, usingInjected = false;
+const readClient = createClient({ chain: studionet });
+const hexChainId = () => "0x" + Number(studionet.id).toString(16);
+async function ensureChain() {
+  if (!usingInjected || !window.ethereum) return;
+  const cur = await window.ethereum.request({ method: "eth_chainId" });
+  if (String(cur).toLowerCase() === hexChainId().toLowerCase()) return;
+  try { await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: hexChainId() }] }); }
+  catch (e) {
+    await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{
+      chainId: hexChainId(), chainName: studionet.name || "GenLayer Studio",
+      nativeCurrency: studionet.nativeCurrency || { name: "GEN", symbol: "GEN", decimals: 18 },
+      rpcUrls: studionet.rpcUrls?.default?.http || [] }] });
+  }
+}
+const sheet = $("walletSheet");
+function openSheet() { $("connDisconnect").hidden = !client; $("connOut").style.display = "none"; $("addrInput").value = CONTRACT_ADDRESS === DEFAULT_CONTRACT ? "" : CONTRACT_ADDRESS; sheet.hidden = false; }
+function closeSheet() { sheet.hidden = true; $("pkInput").value = ""; }
+function connected(label) { $("walletPill").textContent = label; closeSheet(); route(); }
+async function connectInjected() {
+  const out = $("connOut");
+  if (!window.ethereum) return showOut(out, "No browser wallet found here. Open this page inside your wallet app's browser, or use a private key.", "err");
+  try {
+    const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+    account = accounts[0];
+    client = createClient({ chain: studionet, account });
+    usingInjected = true;
+    try { await ensureChain(); } catch (e) { showOut(out, "Connected, but the wallet could not switch to GenLayer Studio: " + (e?.message || e), "err"); }
+    connected(short(account));
+  } catch (e) { showOut(out, "Connection failed: " + (e?.message || String(e)), "err"); }
+}
+function connectKey() {
+  const out = $("connOut");
+  let pk = $("pkInput").value.trim();
+  if (/^[0-9a-fA-F]{64}$/.test(pk)) pk = "0x" + pk;
+  if (!/^0x[0-9a-fA-F]{64}$/.test(pk)) return showOut(out, "Not a valid private key: expected 64 hex characters.", "err");
+  try {
+    const acct = createAccount(pk);
+    account = acct.address; usingInjected = false;
+    client = createClient({ chain: studionet, account: acct });
+    connected(short(account));
+  } catch (e) { showOut(out, "Could not use this key: " + (e?.message || String(e)), "err"); }
+}
+function startTestSession() {
+  const generated = createAccount();
+  account = generated.address ?? generated; usingInjected = false;
+  client = createClient({ chain: studionet, account: generated });
+  connected("Test " + short(account));
+}
+function disconnect() { client = null; account = null; $("walletPill").textContent = "Connect wallet"; closeSheet(); route(); }
+$("walletPill").addEventListener("click", openSheet);
+$("sheetClose").addEventListener("click", closeSheet);
+sheet.addEventListener("click", (e) => { if (e.target === sheet) closeSheet(); });
+$("connInjected").addEventListener("click", connectInjected);
+$("connKey").addEventListener("click", connectKey);
+$("connTest").addEventListener("click", startTestSession);
+$("connDisconnect").addEventListener("click", disconnect);
+$("saveAddr").addEventListener("click", () => {
+  const v = $("addrInput").value.trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(v)) return showOut($("connOut"), "Enter a 0x address with 40 hex characters.", "err");
+  CONTRACT_ADDRESS = v;
+  try { localStorage.setItem("namedeed:contract", v); } catch (e) {}
+  showOut($("connOut"), "Contract address saved in this browser.", "ok");
+  route();
+});
+function needClient(out) {
+  if (client) return true;
+  showOut(out, "Connect a wallet first (top right).", "err");
+  openSheet();
+  return false;
+}
+function needContract(el) {
+  if (CONTRACT_ADDRESS !== DEFAULT_CONTRACT) return true;
+  clear(el).appendChild(h("div", { class: "empty" }, "No contract address is set. Tap the wallet button, paste the deployed contract address and save it."));
+  return false;
+}
+
+/* ---------- contract calls ---------- */
+function unwrap(receipt) {
+  let v = receipt?.consensus_data?.leader_receipt?.[0]?.result?.payload?.readable;
+  if (v === undefined) return null;
+  for (let i = 0; i < 3; i++) {
+    if (typeof v !== "string") break;
+    const t = v.trim();
+    if (!(t.startsWith("{") || t.startsWith("[") || t.startsWith('"'))) break;
+    try { v = JSON.parse(v); } catch (e) { break; }
+  }
+  return v;
+}
+const read = (functionName, args = []) => readClient.readContract({ address: CONTRACT_ADDRESS, functionName, args });
+async function readJson(functionName, args = []) {
+  const raw = await read(functionName, args);
+  return typeof raw === "string" ? JSON.parse(raw) : raw;
+}
+async function write(out, label, functionName, args, valueWei) {
+  if (!needClient(out)) return null;
+  try {
+    showOut(out, `Sending ${label}. Confirm the request in your wallet.`);
+    await ensureChain();
+    const hash = await client.writeContract({ address: CONTRACT_ADDRESS, functionName, args, value: valueWei ?? 0n });
+    showOut(out, `Sent ${short(hash)}. Waiting for validators to finalize…`);
+    const receipt = await client.waitForTransactionReceipt({ hash, status: "FINALIZED", interval: 4000, retries: 60 });
+    const failed = receipt?.consensus_data?.leader_receipt?.[0]?.execution_result === "ERROR";
+    if (failed) { showOut(out, "The contract rejected this call. Check the status and your wallet, then try again.\n\nTx: " + hash, "err"); return null; }
+    showOut(out, "Done.\n\nTx: " + hash, "ok");
+    const result = unwrap(receipt);
+    return result === null ? true : result;
+  } catch (e) { showOut(out, "Error: " + (e?.message || String(e)), "err"); return null; }
+}
+
+/* ---------- labels ---------- */
+const STATUS_LABEL = {
+  proposed: "Waiting for seller", active: "Waiting for observations", observing: "Observing", ruled: "Ruling issued",
+  contested: "Appeal filed", paneled: "Jury voting", closed: "Closed", cancelled: "Cancelled",
+};
+function outcomeOf(d) { return d.final_outcome || d.ruling || null; }
+function tone(d) {
+  if (d.status === "cancelled") return "neutral";
+  const o = outcomeOf(d);
+  if (!o) return "open";
+  if (d.status !== "closed") return "warn";
+  return o === "HANDOVER_COMPLETE" ? "good" : o === "HANDOVER_FAILED" ? "bad" : "neutral";
+}
+
+/* ---------- Explore ---------- */
+let rows = [], total = 0;
+async function loadList(append) {
+  const list = $("deedList");
+  if (!needContract(list)) { $("moreBtn").hidden = true; return; }
+  if (!append) { rows = []; clear(list).appendChild(h("div", { class: "empty" }, h("span", { class: "spin" }), "Loading deeds…")); }
+  try {
+    const page = await readJson("list_deeds", [rows.length, PAGE]);
+    total = Number(page.total);
+    rows = rows.concat(page.items || []);
+    $("moreBtn").hidden = rows.length >= total;
+    renderList();
+  } catch (e) {
+    clear(list).appendChild(h("div", { class: "empty" }, "Could not load deeds. Check the contract address and your connection, then tap Refresh."));
+  }
+}
+function renderList() {
+  const list = clear($("deedList"));
+  const q = $("filterInput").value.trim().toLowerCase();
+  const shown = rows.filter((d) => !q || [d.deed_id, d.domain, d.buyer, d.seller, d.status, outcomeOf(d) || ""].join(" ").toLowerCase().includes(q));
+  if (!shown.length) {
+    list.appendChild(h("div", { class: "empty" }, rows.length ? "No deeds match this filter." : "No deeds yet. Open the first one from the Open tab."));
+    return;
+  }
+  for (const d of shown) {
+    const o = outcomeOf(d);
+    list.appendChild(h("a", { class: "card", href: `#/deed/${d.deed_id}` },
+      h("div", { class: "row" }, h("b", { text: d.domain }), h("span", { class: `pill ${tone(d)}`, text: o && d.status !== "cancelled" ? o : (STATUS_LABEL[d.status] || d.status) })),
+      h("div", { class: "row faint", style: "margin-top:6px" },
+        h("span", { class: "mono", text: `${d.deed_id} · ${short(d.buyer)} to ${short(d.seller)}` }),
+        h("span", { text: `${weiToGen(d.price)} GEN` }))));
+  }
+}
+$("filterInput").addEventListener("input", renderList);
+$("refreshBtn").addEventListener("click", () => loadList(false));
+$("moreBtn").addEventListener("click", () => loadList(true));
+
+/* ---------- Create ---------- */
+function defaultDeadline() {
+  const d = new Date(Date.now() + 26 * 3600000);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+$("fDeadline").value = defaultDeadline();
+$("createBtn").addEventListener("click", async () => {
+  const out = $("createOut");
+  if (!needClient(out) || !needContract(out)) return;
+  const v = (id) => $(id).value.trim();
+  const stake = genToWei(v("fStake"));
+  const bond = genToWei(v("fBond"));
+  const registrar = v("fRegistrar");
+  const deadline = new Date(v("fDeadline"));
+  const gap = parseInt(v("fGap"), 10);
+  if (!/^0x[0-9a-fA-F]{40}$/.test(v("fSeller"))) return showOut(out, "Enter the seller's 0x address.", "err");
+  if (!v("fDomain")) return showOut(out, "Enter the domain.", "err");
+  if (v("fNs").split(",").filter((x) => x.trim()).length < 2) return showOut(out, "Enter at least two nameservers, separated by commas.", "err");
+  if (!v("fTerms")) return showOut(out, "Describe the handover terms.", "err");
+  if (stake === null || stake <= 0n) return showOut(out, "Enter a positive price in GEN.", "err");
+  if (bond === null || bond <= 0n) return showOut(out, "Enter a positive seller bond in GEN.", "err");
+  if (registrar && !/^[1-9][0-9]{0,9}$/.test(registrar)) return showOut(out, "The registrar ID is a number, such as 292. Leave it empty for a nameserver-only handover.", "err");
+  if (isNaN(deadline.getTime())) return showOut(out, "Enter a valid deadline.", "err");
+  const lead = (deadline.getTime() - Date.now()) / 3600000;
+  if (lead <= 0 || lead > 29.9 * 24) return showOut(out, "The deadline must be in the future and less than 30 days away.", "err");
+  if (!Number.isInteger(gap) || gap < 1 || gap > 72) return showOut(out, "Hours between observations must be 1 to 72.", "err");
+  const id = await write(out, "create_deed", "create_deed",
+    [v("fSeller"), v("fDomain"), deadline.toISOString(), v("fNs"), `dns.google,${$("fRdap").value}`, v("fTerms"), bond.toString(), registrar, gap], stake);
+  if (id && typeof id === "string") location.hash = `#/deed/${id}`;
+});
+
+/* ---------- Deed detail ---------- */
+const voteKey = (id) => `namedeed:${CONTRACT_ADDRESS}:${id}:${(account || "").toLowerCase()}`;
+const saveVote = (id, vote, salt) => { try { localStorage.setItem(voteKey(id), JSON.stringify({ vote, salt })); } catch (e) {} };
+const loadVote = (id) => { try { return JSON.parse(localStorage.getItem(voteKey(id)) || "null"); } catch (e) { return null; } };
+async function sha256Hex(text) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function randomSalt() { const a = new Uint8Array(12); crypto.getRandomValues(a); return Array.from(a).map((b) => b.toString(16).padStart(2, "0")).join(""); }
+function bondWei(price) { let b = (BigInt(price) * 2000n) / 10000n; if (b < 1n) b = 1n; return b > 10n ** 30n ? 10n ** 30n : b; }
+function kv(pairs) {
+  const dl = h("dl", { class: "kv" });
+  for (const [k, v] of pairs) { if (v === null || v === undefined || v === "") continue; dl.appendChild(h("dt", { text: k })); dl.appendChild(h("dd", null, v)); }
+  return dl;
+}
+function actionCard(title, note, ...body) { return h("div", { class: "card" }, h("h3", { text: title }), note ? h("p", { class: "hint", text: note }) : null, ...body); }
+let currentId = null;
+function actionButton(label, kind, handler) {
+  const out = h("div", { class: "out" });
+  const btn = h("button", { class: kind || "", type: "button", text: label });
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try { const r = await handler(out); if (r) setTimeout(() => renderDeed(currentId), 700); } finally { btn.disabled = false; }
+  });
+  return [btn, out];
+}
+function copyButton(text) {
+  const b = h("button", { type: "button", text: "Copy value" });
+  b.addEventListener("click", async () => { try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; } catch (e) { b.textContent = "Select and copy by hand"; } });
+  return b;
+}
+const FACT_LABELS = [
+  ["handover_stable", "Handover held for the gap"], ["complete_proven", "Handover proven in time"],
+  ["buyer_holds", "Buyer holds the domain"], ["control_in_time", "Control token seen twice in time"],
+  ["handover_pending", "Handover not yet stable"], ["past_deadline", "Deadline passed"],
+];
+function obsCard(o, d) {
+  const c = o.core;
+  const handed = d.mode === "transfer" ? c.rdap.registrar === d.registrar_id
+    : JSON.stringify(c.rdap.ns) === JSON.stringify([...d.nameservers].sort());
+  return h("div", { class: "obs " + (handed ? "done" : "") },
+    h("div", { class: "row" }, h("b", { text: o.kind === "resolve" ? "Final observation" : `Observation by ${o.by}` }),
+      h("span", { class: "faint", text: fmtTime(o.taken_at) })),
+    h("div", { text: c.txt.token ? "Challenge token present" : "Challenge token absent" }),
+    h("div", { text: handed ? "Handover in place" : "Handover not in place" }),
+    h("div", { class: "faint", text: d.mode === "transfer" ? `Registrar ID: ${c.rdap.registrar || "none"}` : `Registry nameservers: ${c.rdap.ns.join(", ") || "none"}` }));
+}
+
+async function renderDeed(id) {
+  currentId = id;
+  const view = clear($("deedView"));
+  if (!needContract(view)) return;
+  view.appendChild(h("div", { class: "empty" }, h("span", { class: "spin" }), "Loading " + id + "…"));
+  let d;
+  try { d = await readJson("get_deed", [id]); } catch (e) { clear(view).appendChild(h("div", { class: "empty" }, "No deed with the id " + id + ".")); return; }
+  clear(view);
+  const me = account, isBuyer = same(me, d.buyer), isSeller = same(me, d.seller), isParty = isBuyer || isSeller;
+  const o = outcomeOf(d);
+
+  view.appendChild(h("div", { class: "row" }, h("h1", { text: d.domain }), h("span", { class: `pill ${tone(d)}`, text: STATUS_LABEL[d.status] || d.status })));
+  view.appendChild(h("p", { class: "faint mono", text: d.deed_id + (isBuyer ? " · you are the buyer" : isSeller ? " · you are the seller" : "") }));
+
+  if (d.status === "closed" && o) {
+    view.appendChild(h("div", { class: `verdict ${tone(d)}` }, h("div", { class: "faint", text: "Final outcome" }), h("div", { class: "big", text: o })));
+  } else if (d.ruling) {
+    view.appendChild(h("div", { class: `verdict ${tone(d)}` }, h("div", { class: "faint", text: "Automated ruling, open to appeal" }),
+      h("div", { class: "big", text: d.ruling }), h("p", { class: "hint", style: "margin-top:6px", text: d.ruling_reasoning || "" })));
+  }
+
+  if (d.challenge_token && ["active", "observing"].includes(d.status)) {
+    view.appendChild(h("div", { class: "zone" },
+      h("div", { class: "cap", text: "Step 1 for the seller: publish this record while you still run the domain's DNS" }),
+      h("div", { class: "line" }, h("span", { class: "k", text: "Name  " }), d.challenge_name),
+      h("div", { class: "line" }, h("span", { class: "k", text: "Type  " }), "TXT"),
+      h("div", { class: "line" }, h("span", { class: "k", text: "Value " }), d.challenge_token),
+      copyButton(d.challenge_token)));
+    view.appendChild(h("div", { class: "card" }, h("h3", { text: "How the seller proves the handover" }),
+      h("ol", { class: "hint", style: "margin:0;padding-left:20px" },
+        h("li", { text: "Publish the record above, then take an observation. This proves you control the domain." }),
+        h("li", { text: d.mode === "transfer" ? `Transfer the domain to the buyer's registrar (IANA ID ${d.registrar_id}).` : `Change the domain's nameservers at your registrar to: ${d.nameservers.join(", ")}.` }),
+        h("li", { text: "Take another observation once the registry shows the change." }),
+        h("li", { text: `Wait ${fmtDuration(Number(d.min_gap_seconds) * 1000)}, then issue the ruling. Do all of this before ${fmtTime(d.deadline)}.` }))));
+  }
+
+  const gapMs = Number(d.min_gap_seconds) * 1000;
+  view.appendChild(h("div", { class: "card" }, h("h3", { text: "Observations" }),
+    h("p", { class: "hint", text: `Mode: ${d.mode === "transfer" ? "registrar transfer" : "nameserver delegation"}. A proof counts once it holds for ${fmtDuration(gapMs)}.` }),
+    d.observations.length ? h("div", { style: "display:grid;gap:8px" }, d.observations.map((o) => obsCard(o, d))) : h("p", { class: "faint", text: "None yet." }),
+    d.facts ? h("div", { class: "facts" }, FACT_LABELS.map(([k, label]) => h("div", { class: "fact " + (d.facts[k] ? "y" : "n"), text: (d.facts[k] ? "Yes · " : "No · ") + label }))) : null));
+
+  view.appendChild(h("div", { class: "card" },
+    h("p", { text: d.handover_terms }),
+    kv([
+      ["Buyer", h("span", { class: "mono", text: d.buyer })], ["Seller", h("span", { class: "mono", text: d.seller })],
+      ["Price", `${weiToGen(d.price)} GEN`], ["Seller bond", `${weiToGen(d.seller_bond)} GEN`], ["Deadline", fmtTime(d.deadline)],
+      ["Buyer registrar", d.registrar_id || "not used"],
+      ["Nameservers", h("div", { class: "chips" }, d.nameservers.map((n) => h("span", { class: "chip mono", text: n })))],
+      ["Evidence hosts", d.evidence_hosts.join(", ")],
+    ])));
+
+  if (d.jury) {
+    const j = d.jury;
+    view.appendChild(h("div", { class: "card" }, h("h3", { text: "Appeal jury" }),
+      kv([["Appellant", h("span", { class: "mono", text: short(d.appeal?.appellant) })], ["Bond", d.appeal ? `${weiToGen(d.appeal.bond_amount)} GEN` : ""],
+        ["Commit until", fmtTime(j.commit_deadline)], ["Reveal until", fmtTime(j.reveal_deadline)],
+        ["Commits / reveals", `${Object.keys(j.commits || {}).length} / ${Object.keys(j.reveals || {}).length}`],
+        ["Majority", j.provisional_outcome ? `${j.provisional_outcome}${j.verification_passed === null ? "" : j.verification_passed ? " (verified)" : " (not verified)"}` : ""]]),
+      h("div", { class: "faint", style: "margin-top:10px", text: "Selected jurors" }),
+      (j.selected_jurors || []).map((a) => h("div", { class: "mono", text: a }))));
+  }
+
+  const acts = h("div");
+  const st = d.status;
+  const wrong = (role, addr) => account ? `You are connected as ${short(account)}. Switch to ${short(addr)} (${role}) for this step.` : "Connect the " + role + " wallet first.";
+
+  if (st === "proposed") {
+    const [b1, o1] = actionButton(`Accept and post ${weiToGen(d.seller_bond)} GEN bond`, "", (out) => write(out, "accept_deed", "accept_deed", [d.deed_id], BigInt(d.seller_bond)));
+    acts.appendChild(actionCard("Accept this deed", isSeller ? "Only the named seller can accept, posting exactly the bond. Accepting creates your challenge value." : wrong("seller", d.seller), b1, o1));
+    const [b2, o2] = actionButton("Cancel and refund", "danger", (out) => write(out, "cancel_deed", "cancel_deed", [d.deed_id]));
+    acts.appendChild(actionCard("Cancel", isBuyer ? "Only the buyer can cancel, and only before acceptance." : wrong("buyer", d.buyer), b2, o2));
+  }
+  if (st === "active" || st === "observing") {
+    const counts = d.observation_counts || {};
+    const mine = isBuyer ? counts.buyer || 0 : isSeller ? counts.seller || 0 : 0;
+    const [b, o2] = actionButton("Take an observation", "", (out) => write(out, "observe", "observe", [d.deed_id]));
+    acts.appendChild(actionCard("Observe",
+      isParty ? `Validators read the challenge record and the registry and freeze the result. You have used ${mine} of 3. Open until ${fmtTime(d.evidence_deadline)}.` : "Only the buyer or the seller can take observations.", b, o2));
+    if (st === "active" && isPast(d.evidence_deadline)) {
+      const [be, oe] = actionButton("Close deed and refund both", "secondary", (out) => write(out, "expire_unobserved", "expire_unobserved", [d.deed_id]));
+      acts.appendChild(actionCard("Evidence window closed", "Nobody took an observation. Anyone can close the deed; price and bond are refunded.", be, oe));
+    }
+  }
+  if (st === "observing") {
+    const last = d.observations[d.observations.length - 1];
+    const readyAt = ts(last.taken_at) + gapMs;
+    const wait = readyAt - Date.now();
+    const [b, o2] = actionButton("Issue the ruling", "", (out) => write(out, "issue_ruling", "issue_ruling", [d.deed_id]));
+    acts.appendChild(actionCard("Issue the ruling",
+      wait > 0 ? `Opens in ${fmtDuration(wait)} (${fmtTime(new Date(readyAt).toISOString())}), one gap after the latest observation.`
+               : "Anyone can run this. Before the deadline only a proven completion is recorded, and a handover that is not yet stable has to be observed and given the full gap first.", b, o2));
+    const base = Math.max(readyAt, ts(d.evidence_deadline)) + 7 * 86400000;
+    if (Date.now() > base) {
+      const [bx, ox] = actionButton("Close deed and refund both", "secondary", (out) => write(out, "expire_unruled", "expire_unruled", [d.deed_id]));
+      acts.appendChild(actionCard("Ruling timed out", "No ruling within 7 days. Anyone can close the deed; price and bond are refunded.", bx, ox));
+    }
+  }
+  if (st === "ruled") {
+    const note = h("p", { class: "hint", text: "Checking how many jurors are available…" });
+    acts.appendChild(note);
+    read("count_eligible_jurors", [d.deed_id]).then((n) => { const c = Number(n); note.textContent = c >= 5 ? `${c} eligible jurors (5 needed).` : `Only ${c} eligible jurors. An appeal needs 5, so it would fail right now.`; }).catch(() => { note.textContent = ""; });
+    const bond = bondWei(d.price);
+    const [b, o2] = actionButton(`Appeal with ${weiToGen(bond)} GEN bond`, "secondary", (out) => write(out, "contest", "contest", [d.deed_id], bond));
+    acts.appendChild(actionCard("Appeal", isParty ? `Before ${fmtTime(d.appeal_deadline)}. The jury can only choose an outcome the frozen observations allow, and a change from this ruling must also pass a check against the terms.` : "Only the buyer or the seller can appeal.", b, o2));
+    const [b3, o3] = actionButton("Close without appeal", "", (out) => write(out, "close_uncontested", "close_uncontested", [d.deed_id]));
+    acts.appendChild(actionCard("Settle", isPast(d.appeal_deadline) ? "The appeal window has closed. Anyone can settle." : `Available after ${fmtTime(d.appeal_deadline)}.`, b3, o3));
+  }
+  if (st === "contested") {
+    const [bd, od] = actionButton("Seat the jury", "", (out) => write(out, "seat_panel", "seat_panel", [d.deed_id]));
+    acts.appendChild(actionCard("Seat the jury", isPast(d.appeal_deadline) ? "Anyone can do this now. The draw uses a randomness round published after the window." : `Available after ${fmtTime(d.appeal_deadline)}.`, bd, od));
+    if (Date.now() > ts(d.appeal_deadline) + 7 * 86400000) {
+      const [bs, os] = actionButton("Recover stuck appeal", "secondary", (out) => write(out, "expire_stuck_appeal", "expire_stuck_appeal", [d.deed_id]));
+      acts.appendChild(actionCard("Appeal stuck", "The jury could not be seated within 7 days. The ruling stands and the bond is refunded.", bs, os));
+    }
+  }
+  if (st === "paneled") {
+    const j = d.jury, saved = loadVote(d.deed_id);
+    const sel = h("select", null, OUTCOMES.map((x) => h("option", { value: x, text: x })));
+    const salt = h("input", { placeholder: "private salt", value: saved?.salt || "", autocapitalize: "off", spellcheck: "false" });
+    if (saved?.vote) sel.value = saved.vote;
+    const [bc, oc] = actionButton("Commit vote", "", async (out) => {
+      const s = salt.value.trim() || randomSalt(); salt.value = s; saveVote(d.deed_id, sel.value, s);
+      if (!needClient(out)) return null;
+      const hash = await sha256Hex(`${sel.value}:${s}:${String(account).toLowerCase()}:${d.deed_id}`);
+      return write(out, "commit_vote", "commit_vote", [d.deed_id, hash]);
+    });
+    acts.appendChild(actionCard("Commit a vote", `Selected jurors only, until ${fmtTime(j.commit_deadline)}. Your vote and salt are kept in this browser for the reveal.`, h("label", { text: "Vote" }), sel, h("label", { text: "Salt (made for you if empty)" }), salt, bc, oc));
+    const rSel = h("select", null, OUTCOMES.map((x) => h("option", { value: x, text: x })));
+    const rSalt = h("input", { placeholder: "same salt", value: saved?.salt || "", autocapitalize: "off", spellcheck: "false" });
+    if (saved?.vote) rSel.value = saved.vote;
+    const [br, or2] = actionButton("Reveal vote", "secondary", (out) => write(out, "reveal_vote", "reveal_vote", [d.deed_id, rSel.value, rSalt.value.trim()]));
+    acts.appendChild(actionCard("Reveal your vote", `Opens ${fmtTime(j.commit_deadline)}, closes ${fmtTime(j.reveal_deadline)}. Must match the commit.`, h("label", { text: "Vote" }), rSel, h("label", { text: "Salt" }), rSalt, br, or2));
+    const [bf, of2] = actionButton("Close the jury round", "", (out) => write(out, "close_panel", "close_panel", [d.deed_id]));
+    acts.appendChild(actionCard("Close the round", isPast(j.reveal_deadline) ? "Anyone can close it now." : `Available after ${fmtTime(j.reveal_deadline)}.`, bf, of2));
+    if (Date.now() > ts(j.reveal_deadline) + 7 * 86400000) {
+      const [bs, os] = actionButton("Recover stuck appeal", "secondary", (out) => write(out, "expire_stuck_appeal", "expire_stuck_appeal", [d.deed_id]));
+      acts.appendChild(actionCard("Appeal stuck", "The round could not close within 7 days. The ruling stands, the bond is refunded and jurors are unlocked.", bs, os));
+    }
+  }
+  if (st === "closed" || st === "cancelled") {
+    acts.appendChild(h("a", { href: "#/withdraw", class: "card", style: "text-align:center;font-weight:700" }, "Payouts are credited to balances. Open Balance to withdraw."));
+  }
+  view.appendChild(acts);
+  view.appendChild(h("button", { class: "ghost", type: "button", text: "Refresh this deed", onclick: () => renderDeed(id) }));
+}
+
+/* ---------- Jury ---------- */
+$("jRegisterBtn").addEventListener("click", async () => {
+  const out = $("jOut"), wei = genToWei($("jStake").value);
+  if (wei === null || wei <= 0n) return showOut(out, "Enter a positive stake in GEN.", "err");
+  await write(out, "register_juror", "register_juror", [], wei);
+});
+$("jUnstakeBtn").addEventListener("click", async () => {
+  const out = $("jOut"), wei = genToWei($("jUnstake").value);
+  if (wei === null || wei <= 0n) return showOut(out, "Enter a positive amount in GEN.", "err");
+  await write(out, "unstake_juror", "unstake_juror", [wei.toString()]);
+});
+$("jLookupBtn").addEventListener("click", async () => {
+  const out = $("jLookupOut"), addr = $("jAddr").value.trim() || account;
+  if (!addr) return showOut(out, "Enter an address or connect a wallet.", "err");
+  try { const j = await readJson("get_juror", [addr]); showOut(out, j && j.stake !== undefined ? { ...j, stake_gen: weiToGen(j.stake) } : j, "ok"); }
+  catch (e) { showOut(out, "Error: " + (e?.message || String(e)), "err"); }
+});
+
+/* ---------- Balance ---------- */
+async function refreshPending() {
+  if (!account) { $("myPending").textContent = "connect wallet"; return; }
+  try { $("myPending").textContent = weiToGen(await read("get_pending_withdrawal", [account])) + " GEN"; } catch (e) { $("myPending").textContent = "—"; }
+}
+async function refreshBalance() {
+  try { $("contractBal").textContent = weiToGen(await read("get_contract_balance")) + " GEN"; } catch (e) { $("contractBal").textContent = "—"; }
+}
+$("checkPendingBtn").addEventListener("click", refreshPending);
+$("withdrawBtn").addEventListener("click", async () => { const r = await write($("wOut"), "withdraw", "withdraw", []); if (r) refreshPending(); });
+$("wLookupBtn").addEventListener("click", async () => {
+  const out = $("wLookupOut"), addr = $("wAddr").value.trim();
+  if (!addr) return showOut(out, "Enter an address.", "err");
+  try { const raw = await read("get_pending_withdrawal", [addr]); showOut(out, `${weiToGen(raw)} GEN (${raw} wei)`, "ok"); }
+  catch (e) { showOut(out, "Error: " + (e?.message || String(e)), "err"); }
+});
+
+/* ---------- router ---------- */
+function route() {
+  const hash = location.hash || "#/";
+  const m = hash.match(/^#\/deed\/(.+)$/);
+  let name = "home";
+  if (m) name = "deed";
+  else if (hash.startsWith("#/create")) name = "create";
+  else if (hash.startsWith("#/jury")) name = "jury";
+  else if (hash.startsWith("#/withdraw")) name = "withdraw";
+  document.querySelectorAll(".route").forEach((r) => r.classList.toggle("active", r.id === "route-" + name));
+  document.querySelectorAll(".tab-link").forEach((a) => a.classList.toggle("active", a.dataset.tab === (name === "deed" ? "home" : name)));
+  if (name === "home") loadList(false);
+  if (name === "deed") renderDeed(decodeURIComponent(m[1]));
+  if (name === "withdraw") { refreshPending(); refreshBalance(); }
+  window.scrollTo(0, 0);
+}
+window.addEventListener("hashchange", route);
+route();
+</script>
+</body>
+</html>
