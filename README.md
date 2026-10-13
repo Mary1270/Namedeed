@@ -61,9 +61,30 @@ The rest of the suite covers input validation, parsers built against real RDAP a
 
 `index.html` uses `genlayer-js` from esm.sh and `createClient({ chain: studionet, account })`. Hash routes: `#/` (explore), `#/create`, `#/deed/<id>`, `#/jury`, `#/withdraw`. Set the contract address in `DEFAULT_CONTRACT` at the top of the script, or save it from the wallet sheet in the page (kept in that browser only).
 
-## Status
+## Live deployment
 
-The contract and the offline suite are complete. Live verification on GenLayer Studio is the next step; see "Limitations" in `ARCHITECTURE.md`.
+| Contract | Address |
+| --- | --- |
+| Production (`contract_deploy.py`) | [`0x3580ef2c572FdA4828531cE035318F7fEAD4131b`](https://explorer-studio.genlayer.com/address/0x3580ef2c572FdA4828531cE035318F7fEAD4131b) |
+| Short-window test (`contract_short_deploy.py`) | [`0x4C6Ae6369b8D38FFf2e70fd7518f5084736bFB4b`](https://explorer-studio.genlayer.com/address/0x4C6Ae6369b8D38FFf2e70fd7518f5084736bFB4b) |
+
+## Live test on GenLayer Studio
+
+A full lifecycle was run on the short-window contract with real registry and DNS data (`google.com`, transfer mode, buyer registrar IANA ID `292`). Every call reached validator consensus.
+
+| Step | Result |
+| --- | --- |
+| Five jurors register (1 GEN each) | Success |
+| `create_deed` (price 5 GEN) and `accept_deed` (bond 1 GEN) | Success |
+| `observe` by the seller | Real RDAP data frozen: registrar `292`, registry nameservers `ns1`–`ns4.google.com`. dns.google answered `NXDOMAIN` for the challenge name |
+| `issue_ruling` 60 seconds later | Two observations agree, so `complete_proven` is true. Deterministic ruling: `HANDOVER_COMPLETE` |
+| `contest` by the buyer (1 GEN bond) | Success |
+| `seat_panel` | Jury drawn from drand round `6548464`; `verify_jury_selection` replays it (`match: true`) |
+| `commit_vote` / `reveal_vote` | Four commits; two reveals in time. A late commit and late reveals were rejected by the contract windows |
+| `close_panel` | No majority (2 of 5), so the ruling stands, the appeal bond is refunded, and the three jurors who did not reveal are slashed 15% |
+| `withdraw` / `unstake_juror` | Seller 6 GEN, buyer 1 GEN, revealing jurors 0.225 GEN each; the contract balance returned to 0 |
+
+Not exercised live (covered by the offline suite): a verified jury majority that departs from the ruling (the model plausibility check), the `HANDOVER_FAILED` and `PARTIAL_HANDOVER` outcomes, delegation mode, cancel and the expiry paths.
 
 ## License
 

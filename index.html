@@ -172,6 +172,16 @@ nav.tabs a.active{color:var(--signal);box-shadow:inset 0 3px 0 var(--signal)}
       <div id="wLookupOut" class="out"></div>
     </div>
     <div class="card"><div class="row"><span class="faint">Contract holds</span><b id="contractBal">—</b></div></div>
+    <div class="card">
+      <h3>Fund a Studio test account</h3>
+      <p class="hint">GenLayer Studio only. Adds test GEN to any address so the full flow can be tried.</p>
+      <label for="fundAddr">Address</label>
+      <input id="fundAddr" placeholder="0x… (empty uses your wallet)" autocapitalize="off" spellcheck="false">
+      <label for="fundAmt">Amount (whole GEN, 1 to 100)</label>
+      <input id="fundAmt" type="number" min="1" max="100" value="5" inputmode="numeric">
+      <div style="margin-top:10px"><button id="fundBtn" class="secondary" type="button">Fund account</button></div>
+      <div id="fundOut" class="out"></div>
+    </div>
   </section>
 </main>
 
@@ -202,7 +212,7 @@ nav.tabs a.active{color:var(--signal);box-shadow:inset 0 3px 0 var(--signal)}
 import { createClient, createAccount } from "https://esm.sh/genlayer-js@latest";
 import { studionet } from "https://esm.sh/genlayer-js@latest/chains";
 
-const DEFAULT_CONTRACT = "0x0000000000000000000000000000000000000000";
+const DEFAULT_CONTRACT = "0x3580ef2c572FdA4828531cE035318F7fEAD4131b";
 let CONTRACT_ADDRESS = DEFAULT_CONTRACT;
 try { const saved = localStorage.getItem("namedeed:contract"); if (/^0x[0-9a-fA-F]{40}$/.test(saved || "")) CONTRACT_ADDRESS = saved; } catch (e) {}
 const OUTCOMES = ["HANDOVER_COMPLETE", "PARTIAL_HANDOVER", "HANDOVER_FAILED", "UNDETERMINED"];
@@ -682,6 +692,25 @@ $("wLookupBtn").addEventListener("click", async () => {
   if (!addr) return showOut(out, "Enter an address.", "err");
   try { const raw = await read("get_pending_withdrawal", [addr]); showOut(out, `${weiToGen(raw)} GEN (${raw} wei)`, "ok"); }
   catch (e) { showOut(out, "Error: " + (e?.message || String(e)), "err"); }
+});
+
+/* ---------- Studio test funding ---------- */
+$("fundBtn").addEventListener("click", async () => {
+  const out = $("fundOut");
+  const addr = $("fundAddr").value.trim() || account;
+  const gen = parseInt($("fundAmt").value, 10);
+  if (!addr || !/^0x[0-9a-fA-F]{40}$/.test(addr)) return showOut(out, "Enter a 0x address or connect a wallet.", "err");
+  if (!Number.isInteger(gen) || gen < 1 || gen > 100) return showOut(out, "Enter a whole number from 1 to 100.", "err");
+  const url = studionet.rpcUrls?.default?.http?.[0];
+  if (!url) return showOut(out, "No Studio RPC address is available.", "err");
+  try {
+    showOut(out, "Requesting test GEN…");
+    const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "sim_fundAccount", params: [addr, Number(BigInt(gen) * WEI_PER_GEN)] }) });
+    const body = await res.json();
+    if (body.error) return showOut(out, "Studio refused: " + JSON.stringify(body.error), "err");
+    showOut(out, `Funded ${short(addr)} with ${gen} GEN.`, "ok");
+  } catch (e) { showOut(out, "Request failed: " + (e?.message || String(e)), "err"); }
 });
 
 /* ---------- router ---------- */
