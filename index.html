@@ -213,6 +213,7 @@ import { createClient, createAccount } from "https://esm.sh/genlayer-js@latest";
 import { studionet } from "https://esm.sh/genlayer-js@latest/chains";
 
 const DEFAULT_CONTRACT = "0x3580ef2c572FdA4828531cE035318F7fEAD4131b";
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 let CONTRACT_ADDRESS = DEFAULT_CONTRACT;
 try { const saved = localStorage.getItem("namedeed:contract"); if (/^0x[0-9a-fA-F]{40}$/.test(saved || "")) CONTRACT_ADDRESS = saved; } catch (e) {}
 const OUTCOMES = ["HANDOVER_COMPLETE", "PARTIAL_HANDOVER", "HANDOVER_FAILED", "UNDETERMINED"];
@@ -288,7 +289,7 @@ async function ensureChain() {
   }
 }
 const sheet = $("walletSheet");
-function openSheet() { $("connDisconnect").hidden = !client; $("connOut").style.display = "none"; $("addrInput").value = CONTRACT_ADDRESS === DEFAULT_CONTRACT ? "" : CONTRACT_ADDRESS; sheet.hidden = false; }
+function openSheet() { $("connDisconnect").hidden = !client; $("connOut").style.display = "none"; $("addrInput").value = CONTRACT_ADDRESS === ZERO_ADDRESS ? "" : CONTRACT_ADDRESS; sheet.hidden = false; }
 function closeSheet() { sheet.hidden = true; $("pkInput").value = ""; }
 function connected(label) { $("walletPill").textContent = label; closeSheet(); route(); }
 async function connectInjected() {
@@ -344,7 +345,7 @@ function needClient(out) {
   return false;
 }
 function needContract(el) {
-  if (CONTRACT_ADDRESS !== DEFAULT_CONTRACT) return true;
+  if (/^0x[0-9a-fA-F]{40}$/.test(CONTRACT_ADDRESS) && CONTRACT_ADDRESS !== ZERO_ADDRESS) return true;
   clear(el).appendChild(h("div", { class: "empty" }, "No contract address is set. Tap the wallet button, paste the deployed contract address and save it."));
   return false;
 }
