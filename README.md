@@ -91,7 +91,7 @@ The production deployment `0x970d3c629B79D6C05c5aC59db790b3aC75a9DB53` was smoke
 
 A full lifecycle was run on the first short-window deployment with real registry and DNS data (`google.com`, transfer mode, buyer registrar IANA ID `292`). Every call reached validator consensus. The run exercised funding, observation, the ruling, an appeal, the jury draw (replayed on chain), commit and reveal, slashing and withdrawals.
 
-It also exposed a flaw in that version: `google.com` was already sponsored by registrar `292` when the deed was opened, no control proof had been published, and the contract still ruled `HANDOVER_COMPLETE` and paid the seller. The current version requires a baseline observation before a handover can count, so the same data is now `UNDETERMINED` and refunds both sides (`test_domain_already_at_the_buyers_registrar_cannot_pay_the_seller`). Live runs of the current version are listed below once completed.
+It also exposed a flaw in that version: `google.com` was already sponsored by registrar `292` when the deed was opened, no control proof had been published, and the contract still ruled `HANDOVER_COMPLETE` and paid the seller. The current version requires a baseline observation before a handover can count, so the same data is now `UNDETERMINED` and refunds both sides (`test_domain_already_at_the_buyers_registrar_cannot_pay_the_seller`). Live runs of the current version are listed above.
 
 ## License
 
