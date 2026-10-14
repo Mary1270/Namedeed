@@ -38,6 +38,8 @@ class TestSettlement(unittest.TestCase):
     def test_partial_with_late_handover_pays_seller_less_penalty(self):
         deed_id = active_deed(self.c)
         world = world_for(self.c, deed_id)
+        world.seller_publishes()
+        observe(self.c, deed_id, world)
         CLOCK.advance(7 * HOUR)
         world.switch_delegation()
         observe(self.c, deed_id, world)

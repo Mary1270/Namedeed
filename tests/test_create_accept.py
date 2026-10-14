@@ -140,11 +140,12 @@ class TestCreateValidation(unittest.TestCase):
                 with self.assertRaises(Exception):
                     create(self.c, gap_hours=bad)
 
-    def test_failed_create_does_not_consume_an_id_or_keep_value(self):
+    def test_failed_create_does_not_consume_an_id_and_refunds_the_value(self):
         with self.assertRaises(Exception):
             create(self.c, domain="bad domain")
         self.assertEqual(self.c.total_deeds(), 0)
-        self.assertEqual(int(self.c.balance), 0)
+        self.assertEqual(pending(self.c, BUYER), PRICE)
+        self.assertEqual(int(self.c.balance), PRICE)
 
 
 class TestAcceptAndCancel(unittest.TestCase):

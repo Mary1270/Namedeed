@@ -168,20 +168,43 @@ class TestGenLayerRules(unittest.TestCase):
             self.assertIn("leader_result.calldata", text)
 
     def test_every_status_changing_write_checks_status_first(self):
-        exempt = {"register_juror", "unstake_juror", "withdraw", "create_deed"}
+        exempt = {"register_juror", "unstake_juror", "withdraw", "create_deed", "reconcile_withdrawal"}
+        checked = {"accept_deed": "_accept_deed_checked", "contest": "_contest_checked"}
         for name in self.decorated("write"):
             if name in exempt:
                 continue
-            compares = [n for n in ast.walk(self.methods[name]) if isinstance(n, ast.Compare)
+            compares = [n for n in ast.walk(self.methods[checked.get(name, name)]) if isinstance(n, ast.Compare)
                         and isinstance(n.left, ast.Subscript) and isinstance(n.left.slice, ast.Constant)
                         and n.left.slice.value == "status"]
             self.assertTrue(compares, name)
 
     def test_sensitive_writes_check_the_caller(self):
+        checked = {"accept_deed": "_accept_deed_checked", "contest": "_contest_checked"}
         for name in ("accept_deed", "cancel_deed", "observe", "contest", "commit_vote", "reveal_vote", "withdraw",
                      "unstake_juror"):
-            text = ast.unparse(self.methods[name])
+            text = ast.unparse(self.methods[checked.get(name, name)])
             self.assertTrue("sender_address" in text or "_require_party" in text, name)
+
+    def test_every_payable_method_counts_the_value_and_rejects_instead_of_reverting(self):
+        payable = self.decorated("payable")
+        self.assertEqual(sorted(payable), ["accept_deed", "contest", "create_deed", "register_juror"])
+        for name in payable:
+            node = self.methods[name]
+            body = [n for n in node.body if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))]
+            self.assertIn("self._received()", ast.unparse(body[0]), name)
+            handler = body[1]
+            self.assertIsInstance(handler, ast.Try, name)
+            self.assertEqual([ast.unparse(h.type) for h in handler.handlers], ["Exception"], name)
+            self.assertIn("self._reject(", ast.unparse(handler.handlers[0]), name)
+            self.assertFalse([n for n in ast.walk(node) if isinstance(n, ast.Raise)], name)
+
+    def test_payable_bodies_read_everything_before_the_first_write(self):
+        writes = ("self._save(", "self._save_juror(", "self._credit(", "self.deed_count =", "self.deeds[", "self.jurors[")
+        for name in ("_create_deed_checked", "_accept_deed_checked", "_contest_checked", "_register_juror_checked"):
+            lines = ast.unparse(self.methods[name]).split("\n")
+            first_write = next((i for i, line in enumerate(lines) if any(w in line for w in writes)), len(lines))
+            raises = [i for i, line in enumerate(lines) if line.strip().startswith("raise ")]
+            self.assertTrue(all(i < first_write for i in raises), name)
 
     def test_time_and_sender_sources(self):
         self.assertIn("datetime.datetime.now(datetime.timezone.utc)", self.source)

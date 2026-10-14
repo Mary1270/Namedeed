@@ -98,18 +98,47 @@ def reset_transfers():
     gl.evm.transfers.clear()
 
 
+class Rejected(Exception):
+    """A payable call the contract refused without reverting: it returned
+    {"rejected": true, ...} and credited the GEN back to the sender."""
+
+    def __init__(self, result):
+        super().__init__(result.get("reason", ""))
+        self.result = result
+
+
 def call_payable(contract, method, value, *args, **kwargs):
-    """Call a payable method with `value` wei attached; the balance credit
-    is rolled back if the call reverts."""
+    """Call a payable method with `value` wei attached. The GEN stays in the
+    contract balance. A rejection (a normal return) is raised as `Rejected`
+    so a test can still assert that a call did not succeed; the refund is
+    then visible in the sender's pending balance."""
     gl.message.value = u256(value)
     contract.balance = contract.balance + u256(value)
     try:
-        return getattr(contract, method)(*args, **kwargs)
+        out = getattr(contract, method)(*args, **kwargs)
     except Exception:
         contract.balance = contract.balance - u256(value)
         raise
     finally:
         gl.message.value = u256(0)
+    if isinstance(out, str) and out.startswith("{"):
+        try:
+            parsed = json.loads(out)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("rejected") is True:
+            raise Rejected(parsed)
+    return out
+
+
+def deliver_transfers(contract, deliver=True):
+    """Model the runtime executing the transfers the contract emitted: the
+    contract balance drops by each amount (or, with deliver=False, the
+    transfers fail and the balance stays). The emitted list is cleared."""
+    for item in list(gl.evm.transfers):
+        if deliver:
+            contract.balance = contract.balance - item["value"]
+    gl.evm.transfers.clear()
 
 
 def make_contract():

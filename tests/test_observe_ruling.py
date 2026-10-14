@@ -104,8 +104,9 @@ class TestRulingGate(unittest.TestCase):
     def test_ruling_waits_for_the_gap_after_the_latest_observation(self):
         deed_id = active_deed(self.c, gap_hours=2)
         world = world_for(self.c, deed_id)
-        world.switch_delegation()
+        world.seller_publishes()
         observe(self.c, deed_id, world)
+        world.switch_delegation()
         CLOCK.advance(HOUR)
         observe(self.c, deed_id, world, caller=BUYER)
         CLOCK.advance(2 * HOUR - 1)
@@ -144,7 +145,10 @@ class TestRulingGate(unittest.TestCase):
     def test_fetch_failure_at_ruling_is_retryable(self):
         deed_id = active_deed(self.c)
         world = world_for(self.c, deed_id)
+        world.seller_publishes()
+        observe(self.c, deed_id, world)
         world.switch_delegation()
+        CLOCK.advance(10 * MIN)
         observe(self.c, deed_id, world)
         CLOCK.advance(HOUR)
         world.fail = {"rdap"}
@@ -190,31 +194,76 @@ class TestFactsUnit(unittest.TestCase):
         return M._facts(dict(self.DEED, **deed), observations)
 
     def test_complete_requires_a_run_spanning_the_gap(self):
-        f = self.facts([self.obs(0, handed=True), self.obs(59, handed=True)])
+        base = self.obs(0, token=True)
+        f = self.facts([base, self.obs(10, handed=True), self.obs(69, handed=True)])
         self.assertTrue(f["handover_pending"])
         self.assertFalse(f["complete_proven"])
-        f = self.facts([self.obs(0, handed=True), self.obs(60, handed=True)])
+        f = self.facts([base, self.obs(10, handed=True), self.obs(70, handed=True)])
         self.assertTrue(f["complete_proven"])
+        self.assertTrue(f["baseline_seen"])
         self.assertEqual(M._default_outcome(f), "HANDOVER_COMPLETE")
 
     def test_a_gap_in_the_run_restarts_it(self):
-        f = self.facts([self.obs(0, handed=True), self.obs(30), self.obs(40, handed=True), self.obs(90, handed=True)])
+        f = self.facts([self.obs(0, token=True), self.obs(5, handed=True), self.obs(30), self.obs(40, handed=True),
+                        self.obs(90, handed=True)])
         self.assertTrue(f["handover_pending"])
 
     def test_run_start_after_deadline_is_late(self):
-        f = self.facts([self.obs(400, handed=True), self.obs(470, handed=True)])
+        f = self.facts([self.obs(0, token=True), self.obs(400, handed=True), self.obs(470, handed=True)])
         self.assertTrue(f["late_handover"])
         self.assertEqual(M._default_outcome(f), "PARTIAL_HANDOVER")
 
     def test_transfer_mode_counts_a_run_that_ended_before_the_final_observation(self):
-        a = self.obs(0, registrar="2002")
-        b = self.obs(70, registrar="2002")
-        c = self.obs(500, registrar="3003")
-        f = self.facts([a, b, c], mode="transfer", registrar_id="2002")
+        a = self.obs(0, token=True, registrar="1001")
+        b = self.obs(10, registrar="2002")
+        c = self.obs(80, registrar="2002")
+        d = self.obs(500, registrar="3003")
+        f = self.facts([a, b, c, d], mode="transfer", registrar_id="2002")
         self.assertTrue(f["complete_proven"])
         self.assertTrue(f["buyer_holds"])
-        f = self.facts([a, b, c])
+        f = self.facts([a, b, c, d])
         self.assertFalse(f["complete_proven"])
+
+    def test_a_handover_already_in_place_at_the_first_sighting_is_never_complete(self):
+        f = self.facts([self.obs(0, handed=True), self.obs(70, handed=True)])
+        self.assertFalse(f["baseline_seen"])
+        self.assertFalse(f["complete_proven"])
+        self.assertTrue(f["handover_unbaselined"])
+        self.assertFalse(f["handover_pending"])
+        self.assertEqual(M._default_outcome(f), "UNDETERMINED")
+
+    def test_transfer_mode_target_registrar_already_in_place_is_undetermined(self):
+        a = self.obs(0, registrar="2002")
+        b = self.obs(70, registrar="2002")
+        f = self.facts([a, b], mode="transfer", registrar_id="2002")
+        self.assertTrue(f["handover_unbaselined"])
+        self.assertEqual(M._default_outcome(f), "UNDETERMINED")
+        self.assertEqual(M._clamp_outcome("HANDOVER_COMPLETE", f), "UNDETERMINED")
+
+    def test_control_after_the_handover_is_not_a_baseline(self):
+        f = self.facts([self.obs(0, handed=True), self.obs(10, handed=True, token=True), self.obs(80, handed=True, token=True)])
+        self.assertFalse(f["baseline_seen"])
+        self.assertFalse(f["complete_proven"])
+
+    def test_a_single_match_that_never_held_does_not_block_failure_in_transfer_mode(self):
+        a = self.obs(0, token=True, registrar="1001")
+        b = self.obs(10, registrar="2002")
+        c = self.obs(400, registrar="1001")
+        f = self.facts([a, b, c], mode="transfer", registrar_id="2002")
+        self.assertFalse(f["handover_stable"])
+        self.assertTrue(f["handover_ever"])
+        self.assertFalse(f["control_in_time"])
+        self.assertTrue(f["failure_shown"])
+        self.assertEqual(M._default_outcome(f), "HANDOVER_FAILED")
+
+    def test_a_matured_transfer_that_later_reverts_still_blocks_failure(self):
+        a = self.obs(0, token=True, registrar="1001")
+        b = self.obs(10, registrar="2002")
+        c = self.obs(80, registrar="2002")
+        d = self.obs(500, registrar="1001")
+        f = self.facts([a, b, c, d], mode="transfer", registrar_id="2002")
+        self.assertTrue(f["complete_proven"])
+        self.assertFalse(f["failure_shown"])
 
     def test_failure_needs_an_answered_query_and_registry_data(self):
         late = 400
@@ -232,19 +281,35 @@ class TestFactsUnit(unittest.TestCase):
         self.assertFalse(self.facts([self.obs(361, token=True), self.obs(430, token=True), self.obs(500)])["control_in_time"])
 
     def test_allowed_outcomes(self):
-        complete = self.facts([self.obs(0, handed=True), self.obs(60, handed=True)])
+        complete = self.facts([self.obs(0, token=True), self.obs(10, handed=True), self.obs(70, handed=True)])
         self.assertEqual(M._allowed_outcomes(complete), ["HANDOVER_COMPLETE", "PARTIAL_HANDOVER"])
         failed = self.facts([self.obs(0), self.obs(400)])
         self.assertEqual(M._allowed_outcomes(failed), ["HANDOVER_FAILED", "UNDETERMINED"])
-        late = self.facts([self.obs(400, handed=True), self.obs(470, handed=True)])
+        late = self.facts([self.obs(0, token=True), self.obs(400, handed=True), self.obs(470, handed=True)])
         self.assertEqual(M._allowed_outcomes(late), ["PARTIAL_HANDOVER"])
 
+    def test_transfer_mode_lets_a_jury_find_that_the_buyer_never_received_the_domain(self):
+        a = self.obs(0, token=True, registrar="1001")
+        b = self.obs(10, registrar="2002")
+        c = self.obs(80, registrar="2002")
+        f = self.facts([a, b, c], mode="transfer", registrar_id="2002")
+        self.assertEqual(set(M._allowed_outcomes(f)),
+                         {"HANDOVER_COMPLETE", "PARTIAL_HANDOVER", "UNDETERMINED", "HANDOVER_FAILED"})
+        late = self.facts([self.obs(0, token=True, registrar="1001"), self.obs(400, registrar="2002"),
+                           self.obs(470, registrar="2002")], mode="transfer", registrar_id="2002")
+        self.assertEqual(set(M._allowed_outcomes(late)), {"PARTIAL_HANDOVER", "UNDETERMINED", "HANDOVER_FAILED"})
+        control = self.facts([self.obs(0, token=True), self.obs(60, token=True), self.obs(400)],
+                             mode="transfer", registrar_id="2002")
+        self.assertEqual(M._default_outcome(control), "PARTIAL_HANDOVER")
+        self.assertEqual(set(M._allowed_outcomes(control)), {"PARTIAL_HANDOVER", "UNDETERMINED"})
+
     def test_backstop_forces_unproven_complete_down(self):
-        for observations in ([self.obs(0), self.obs(400)], [self.obs(0, handed=True), self.obs(30, handed=True)],
+        for observations in ([self.obs(0), self.obs(400)], [self.obs(0, token=True), self.obs(10, handed=True), self.obs(40, handed=True)],
+                             [self.obs(0, handed=True), self.obs(70, handed=True)],
                              [self.obs(0, token=True), self.obs(70, token=True), self.obs(400)]):
             f = self.facts(observations)
             self.assertEqual(M._clamp_outcome("HANDOVER_COMPLETE", f), "UNDETERMINED")
-        f = self.facts([self.obs(0, handed=True), self.obs(60, handed=True)])
+        f = self.facts([self.obs(0, token=True), self.obs(10, handed=True), self.obs(70, handed=True)])
         self.assertEqual(M._clamp_outcome("HANDOVER_COMPLETE", f), "HANDOVER_COMPLETE")
         self.assertEqual(M._clamp_outcome("HANDOVER_FAILED", f), "UNDETERMINED")
         self.assertEqual(M._clamp_outcome("bogus", f), "UNDETERMINED")
