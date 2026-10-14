@@ -9,11 +9,11 @@ The design starts from one question: for every piece of data the contract reads,
 | Data | Read from | Controlled by |
 | --- | --- | --- |
 | Delegation (the domain's nameservers at the registry) | RDAP `nameservers` | The sponsoring registrar, on the account holder's instruction |
-| Sponsoring registrar | RDAP entity with role `registrar`, `IANA Registrar ID` | Changes only through an inter-registrar transfer |
 | TXT record at `_namedeed.<domain>` | dns.google | Whoever the registry delegates to: the seller before a switch, the buyer after it |
+| TXT record at `_namedeed-buyer.<domain>` | dns.google | The same: after a switch, only the buyer's zone can serve it, and only the buyer knows the secret it must contain |
 | NS records inside the zone (apex NS) | not read | Whoever runs the zone; never used, because either side can forge them |
 
-Earlier versions read the zone's own NS records and required the challenge token after the switch. Both were wrong: the seller could forge apex NS records without moving anything, and once the domain moved, the buyer ran the zone and could withhold the token to turn a real handover into a failure. The current design reads the handover **only from registry data**, and uses the token **only to prove the seller's control** before the switch.
+Earlier versions read the zone's own NS records and required the challenge token after the switch. Both were wrong: the seller could forge apex NS records without moving anything, and once the domain moved, the buyer ran the zone and could withhold the token to turn a real handover into a failure. The current design needs two things together: the registry delegation (registry data, which no zone operator can forge) and the **buyer's own secret** served from the zone that delegation points to. The seller's token proves only the seller's control before the switch. A registry match alone never pays the seller, because a seller can change a delegation without the buyer ever receiving control of anything.
 
 ## 2. Money and roles
 
@@ -34,12 +34,9 @@ The penalty is `PARTIAL_PENALTY_BPS` (50%) of the bond.
 
 ## 3. Anchors
 
-`create_deed` stores, before anyone knows how things will go: the domain; the record type (`TXT`); the deadline; the buyer's nameserver set; the buyer's IANA registrar ID (optional); the two evidence hosts (`dns.google` and `rdap.verisign.com` for `.com` and `.net`, or `rdap.publicinterestregistry.org` for `.org`); and the minimum gap. The seller sees all of it before posting the bond. The contract builds every URL it fetches from these anchors; no party supplies a URL. The hosts are still validated with `urlsplit` (https only, no userinfo, exact host or subdomain), and the two hosts must belong to different registrable domains.
+`create_deed` stores, before anyone knows how things will go: the domain; the record type (`TXT`); the deadline; the buyer's nameserver set; the sha256 of the buyer's secret; the two evidence hosts (`dns.google` and `rdap.verisign.com` for `.com` and `.net`, or `rdap.publicinterestregistry.org` for `.org`); and the minimum gap. The seller sees all of it before posting the bond. The contract builds every URL it fetches from these anchors; no party supplies a URL. The hosts are still validated with `urlsplit` (https only, no userinfo, exact host or subdomain), and the two hosts must belong to different registrable domains.
 
-**Two modes.**
-
-- **Transfer mode** (registrar ID given): the handover is the domain being sponsored by the buyer's registrar. After a transfer the buyer controls the delegation, so the nameserver set is not decisive in this mode.
-- **Delegation mode** (no registrar ID): the handover is the registry delegation equal to the anchored nameserver set. The seller keeps the registrar account, so this mode is weaker (see section 10). The dApp recommends transfer mode.
+**One mode: delegation with a buyer proof.** The handover is (1) the registry delegation equal to the anchored nameserver set, and (2) the zone that delegation points to serving the buyer's secret as a TXT record at `_namedeed-buyer.<domain>`, where `sha256(secret)` equals the hash anchored at creation. The buyer picks a secret of its own and never puts it on chain; only the buyer can publish it. An earlier version also had a registrar-transfer mode that paid on a registrar match; it was removed because a registrar ID cannot show whose account at that registrar received the domain.
 
 ## 4. Handshake nonce
 
@@ -56,7 +53,8 @@ The seller publishes it as a TXT record at `_namedeed.<domain>` while still runn
 `observe` (buyer or seller, three each, until the evidence deadline) takes one observation:
 
 - `https://dns.google/resolve?name=_namedeed.<domain>&type=TXT`: `Status` and whether a type-16 answer at exactly that name equals the token. Values are compared after removing quotes; dns.google returns them unquoted.
-- The RDAP domain object: `ldhName` must equal the domain; it records the delegation from `nameservers`, the IANA ID of the registrar entity, and the registration and last-changed dates for display.
+- `https://dns.google/resolve?name=_namedeed-buyer.<domain>&type=TXT`: whether a type-16 answer at exactly that name hashes (sha256 of the unquoted value) to the anchored buyer hash.
+- The RDAP domain object: `ldhName` must equal the domain; it records the delegation from `nameservers` and the registration and last-changed dates for display.
 
 Each observation is reduced to these decisive fields. TTLs, raw text and unrelated records are dropped, so validators fetching a moment apart still agree. Validators re-run both fetches and compare the reduced result exactly in code through `gl.vm.run_nondet_unsafe`. A failed or unparsable fetch reverts the call so it can be retried; it never becomes evidence. Each observation is frozen on-chain with its digest, and `evidence_root` commits to the ordered list.
 
@@ -69,14 +67,15 @@ All facts are computed in code from the ordered, frozen observations (`_facts`):
 | Fact | Meaning |
 | --- | --- |
 | `baseline_seen` | An observation shows the token (the seller controls the zone) while the handover is not in place. Only a handover run that starts after it can count. |
-| `handover_stable` | A run after the baseline, seen in consecutive observations spanning at least the gap. In delegation mode this run must reach the final observation (a revert is the seller's). In transfer mode any such run counts (after the transfer only the buyer can move the domain). |
-| `handover_unbaselined` | A run spanning the gap exists, but no baseline precedes it (for example the registry already showed the buyer's registrar at the first sighting). It never counts as a handover and the default is `UNDETERMINED`. |
+| `handover_stable` | A run after the baseline, seen in consecutive observations spanning at least the gap, where each observation shows the registry delegation AND the buyer's secret. The run must reach the final observation (a revert is the seller's). |
+| `delegation_unproven` | At the final observation the delegation matches but the buyer's secret is not served. Nobody is paid on it: the default is `UNDETERMINED` and both sides are refunded, so neither side gains by withholding or faking the proof. |
+| `handover_unbaselined` | A run spanning the gap exists, but no baseline precedes it (for example the registry already showed the buyer's nameservers at the first sighting). It never counts as a handover and the default is `UNDETERMINED`. |
 | `complete_proven` | `handover_stable`, and the run started at or before the deadline |
 | `late_handover` | `handover_stable`, but the run started after the deadline |
 | `handover_pending` | Handover in place at the final observation but no run has spanned the gap yet. The ruling **reverts** instead of settling. |
-| `buyer_holds` | Handover in place at the final observation, or (transfer mode) a run spanning the gap happened |
+| `buyer_holds` | Handover (delegation and buyer secret) in place at the final observation |
 | `control_in_time` | Token seen in two observations at least the gap apart, the first at or before the deadline |
-| `failure_shown` | After the deadline: the TXT query was answered (`NOERROR` or `NXDOMAIN`), the registry answered for this domain, no handover now, no control in time, and (transfer mode) no run that spanned the gap. A match seen once, or twice closer than the gap, and then reverted does not block a failure ruling. |
+| `failure_shown` | After the deadline: the TXT query was answered (`NOERROR` or `NXDOMAIN`), the registry answered for this domain, no handover now, no control in time, and no unproven delegation. A match seen once, or twice closer than the gap, and then reverted does not block a failure ruling. |
 
 A record or delegation flashed for one observation never counts, because every proof needs two sightings at least the gap apart. A handover with no baseline never counts either.
 
@@ -84,7 +83,7 @@ A record or delegation flashed for one observation never counts, because every p
 
 ## 7. Tier 1 is deterministic; Tier 2 is bounded
 
-**Tier 1.** `issue_ruling` maps the facts to an outcome in code (`_default_outcome`): completion, then late handover, then a handover with no baseline (`UNDETERMINED`), then control in time, then failure, otherwise `UNDETERMINED`. No model is called, so no party-written text can influence it and validators cannot disagree about wording. Before the deadline only `HANDOVER_COMPLETE` can be recorded; anything else reverts and leaves the deed open.
+**Tier 1.** `issue_ruling` maps the facts to an outcome in code (`_default_outcome`): completion, then late handover, then a handover with no baseline (`UNDETERMINED`), then a delegation without the buyer's proof (`UNDETERMINED`), then control in time, then failure, otherwise `UNDETERMINED`. No model is called, so no party-written text can influence it and validators cannot disagree about wording. Before the deadline only `HANDOVER_COMPLETE` can be recorded; anything else reverts and leaves the deed open.
 
 **Backstop.** `_clamp_outcome` turns any outcome not in `_allowed_outcomes` into `UNDETERMINED`. `HANDOVER_COMPLETE` is allowed only when `complete_proven` is true.
 
@@ -96,7 +95,6 @@ After the reveal window, `close_panel` verifies a strict majority against the fr
 2. The facts are recomputed and the majority must be in `_allowed_outcomes`:
    - the code default is always allowed;
    - a proven completion may be downgraded to `PARTIAL_HANDOVER`, for off-chain terms the code cannot see (website files, email, and so on);
-   - in transfer mode, when the default pays the seller for a handover (`HANDOVER_COMPLETE`, or `PARTIAL_HANDOVER` with the buyer holding), `UNDETERMINED` (refund both) and `HANDOVER_FAILED` are also allowed. A registrar match proves which registrar sponsors the domain, not whose account holds it, so a jury can find that the buyer never received the domain;
    - otherwise `UNDETERMINED` is allowed only while the buyer does **not** already hold the domain;
    - nothing above what the facts prove is ever allowed.
 3. A majority equal to the code default is verified by code.
@@ -142,8 +140,9 @@ Only one payout can be in flight. A new `withdraw()` first tries to settle the p
 
 - **The suite uses a modelled runtime.** It runs against a self-written SDK stub, a modelled registry and DNS, and a pinned clock. The parsers were written against real responses (`rdap.verisign.com` for google.com, `rdap.publicinterestregistry.org` for wikipedia.org, `dns.google` TXT). The live runs are listed in the README; what they do and do not cover is stated there.
 - **A baseline needs the seller to act in order.** The seller must publish the token and observe before moving the domain. A seller who moves first, or a domain that was already at the target, is refunded, never paid.
-- **Delegation mode leaves the registrar account with the seller.** The seller can switch the nameservers back after settlement. Transfer mode avoids this, because a transfer back needs the buyer's authorisation code, and registrars commonly block a new transfer for 60 days after the last one. Delegation mode must not be combined with a same-registrar account push: after a push the buyer could move the delegation away and the contract cannot tell who did it.
-- **Transfer mode trusts the registry's registrar entity.** It proves which registrar sponsors the domain, not which account at that registrar. A seller with an account at the buyer's registrar could transfer into their own account there. The handover terms should name the receiving account, and the jury can downgrade a completion when the buyer shows it did not arrive.
+- **The registrar account stays with the seller.** The seller can switch the nameservers back after settlement; the contract proves the handover at ruling time, not afterwards. The buyer should move the domain into its own registrar account (an off-chain step the handover terms can require) and the jury can downgrade a completion when the terms were not met. Delegation must not be combined with a same-registrar account push: after a push the buyer could move the delegation away and the contract cannot tell who did it.
+- **The buyer can withhold its proof.** A buyer who never publishes its secret gets no gain: the result is `UNDETERMINED` and both sides are refunded. The cost is that a seller who really handed over the domain is not paid in that case; the seller can switch the nameservers back and the jury route exists for terms outside the data.
+- **The proof secret is revealed by publishing it.** After the buyer publishes it, the secret is public. It only ever proves control of one deed's zone and is never reused by the contract.
 - **Registry data lags.** RDAP and dns.google reflect changes within minutes to hours. Sellers should hand over early, and the gap should comfortably exceed the expected lag.
 - **Coverage.** Only `TXT` is used for the handshake, and only the two built-in RDAP hosts are supported (`.com`, `.net`, `.org`). Other TLDs need a code change.
 - **The plausibility check is a model.** It only gates a jury departure from a code default that the jurors themselves voted for, and it can only move the outcome inside the allowed set. Party-written terms can still mislead it.

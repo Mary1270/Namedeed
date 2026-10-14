@@ -104,12 +104,12 @@ nav.tabs a.active{color:var(--signal);box-shadow:inset 0 3px 0 var(--signal)}
       <input id="fSeller" placeholder="0x…" autocapitalize="off" spellcheck="false">
       <label for="fDomain">Domain</label>
       <input id="fDomain" placeholder="example.com" autocapitalize="off" spellcheck="false">
-      <label for="fRegistrar">Your registrar's IANA ID (recommended)</label>
-      <input id="fRegistrar" placeholder="e.g. 292" inputmode="numeric">
-      <p class="hint">Fill this in when the seller transfers the domain to your registrar. The handover is then proven by the registry itself and the seller cannot quietly take it back. Leave it empty only for a nameserver-only handover.</p>
+      <label for="fSecret">Your buyer secret (keep it private)</label>
+      <input id="fSecret" autocapitalize="off" spellcheck="false">
+      <p class="hint">Only its hash goes on chain. After the seller changes the nameservers, you publish this exact value as a TXT record at <span class="mono">_namedeed-buyer.&lt;domain&gt;</span> in the DNS zone at your nameservers. The seller is paid only when the registry shows your nameservers AND that zone serves your secret, so a nameserver change alone proves nothing. Write the secret down before you open the deed.</p>
       <label for="fNs">Nameservers the domain must use</label>
       <textarea id="fNs" placeholder="ns1.your-dns.net, ns2.your-dns.net" spellcheck="false" autocapitalize="off"></textarea>
-      <p class="hint">At least two, comma separated. Checked against the registry when no registrar ID is given.</p>
+      <p class="hint">At least two, comma separated. Checked against the registry.</p>
       <label for="fRdap">RDAP host</label>
       <select id="fRdap">
         <option value="rdap.verisign.com">rdap.verisign.com (.com, .net)</option>
@@ -220,7 +220,7 @@ nav.tabs a.active{color:var(--signal);box-shadow:inset 0 3px 0 var(--signal)}
 import { createClient, createAccount } from "https://esm.sh/genlayer-js@latest";
 import { studionet } from "https://esm.sh/genlayer-js@latest/chains";
 
-const DEFAULT_CONTRACT = "0x970d3c629B79D6C05c5aC59db790b3aC75a9DB53";
+const DEFAULT_CONTRACT = "0xB44eBf81164AE592f54E5818Ab82f8625485e266";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 let CONTRACT_ADDRESS = DEFAULT_CONTRACT;
 try { const saved = localStorage.getItem("namedeed:contract"); if (/^0x[0-9a-fA-F]{40}$/.test(saved || "")) CONTRACT_ADDRESS = saved; } catch (e) {}
@@ -482,13 +482,14 @@ function defaultDeadline() {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
 $("fDeadline").value = defaultDeadline();
+$("fSecret").value = Array.from(crypto.getRandomValues(new Uint8Array(16))).map((b) => b.toString(16).padStart(2, "0")).join("");
 $("createBtn").addEventListener("click", async () => {
   const out = $("createOut");
   if (!needClient(out) || !needContract(out)) return;
   const v = (id) => $(id).value.trim();
   const stake = genToWei(v("fStake"));
   const bond = genToWei(v("fBond"));
-  const registrar = v("fRegistrar");
+  const secret = v("fSecret");
   const deadline = new Date(v("fDeadline"));
   const gap = parseInt(v("fGap"), 10);
   if (!/^0x[0-9a-fA-F]{40}$/.test(v("fSeller"))) return showOut(out, "Enter the seller's 0x address.", "err");
@@ -497,13 +498,14 @@ $("createBtn").addEventListener("click", async () => {
   if (!v("fTerms")) return showOut(out, "Describe the handover terms.", "err");
   if (stake === null || stake <= 0n) return showOut(out, "Enter a positive price in GEN.", "err");
   if (bond === null || bond <= 0n) return showOut(out, "Enter a positive seller bond in GEN.", "err");
-  if (registrar && !/^[1-9][0-9]{0,9}$/.test(registrar)) return showOut(out, "The registrar ID is a number, such as 292. Leave it empty for a nameserver-only handover.", "err");
+  if (secret.length < 16) return showOut(out, "The buyer secret must be at least 16 characters.", "err");
+  const secretHash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret)))).map((b) => b.toString(16).padStart(2, "0")).join("");
   if (isNaN(deadline.getTime())) return showOut(out, "Enter a valid deadline.", "err");
   const lead = (deadline.getTime() - Date.now()) / 3600000;
   if (lead <= 0 || lead > 29.9 * 24) return showOut(out, "The deadline must be in the future and less than 30 days away.", "err");
   if (!Number.isInteger(gap) || gap < 1 || gap > 72) return showOut(out, "Hours between observations must be 1 to 72.", "err");
   const id = await write(out, "create_deed", "create_deed",
-    [v("fSeller"), v("fDomain"), deadline.toISOString(), v("fNs"), `dns.google,${$("fRdap").value}`, v("fTerms"), bond.toString(), registrar, gap], stake,
+    [v("fSeller"), v("fDomain"), deadline.toISOString(), v("fNs"), `dns.google,${$("fRdap").value}`, v("fTerms"), bond.toString(), secretHash, gap], stake,
     async (newId) => {
       if (typeof newId !== "string") return { ok: false, note: "no deed id was returned" };
       const d = await readJson("get_deed", [newId]);
@@ -547,18 +549,19 @@ const FACT_LABELS = [
   ["handover_stable", "Handover held for the gap"], ["complete_proven", "Handover proven in time"],
   ["baseline_seen", "Baseline: token seen before the handover"], ["handover_unbaselined", "Handover already in place at first sight"],
   ["buyer_holds", "Buyer holds the domain"], ["control_in_time", "Control token seen twice in time"],
-  ["handover_pending", "Handover not yet stable"], ["past_deadline", "Deadline passed"],
+  ["handover_pending", "Handover not yet stable"], ["delegation_unproven", "Nameservers match but buyer secret missing"], ["past_deadline", "Deadline passed"],
 ];
 function obsCard(o, d) {
   const c = o.core;
-  const handed = d.mode === "transfer" ? c.rdap.registrar === d.registrar_id
-    : JSON.stringify(c.rdap.ns) === JSON.stringify([...d.nameservers].sort());
+  const nsMatch = JSON.stringify(c.rdap.ns) === JSON.stringify([...d.nameservers].sort());
+  const handed = nsMatch && !!c.btxt.token;
   return h("div", { class: "obs " + (handed ? "done" : "") },
     h("div", { class: "row" }, h("b", { text: o.kind === "resolve" ? "Final observation" : `Observation by ${o.by}` }),
       h("span", { class: "faint", text: fmtTime(o.taken_at) })),
     h("div", { text: c.txt.token ? "Challenge token present" : "Challenge token absent" }),
-    h("div", { text: handed ? "Handover in place" : "Handover not in place" }),
-    h("div", { class: "faint", text: d.mode === "transfer" ? `Registrar ID: ${c.rdap.registrar || "none"}` : `Registry nameservers: ${c.rdap.ns.join(", ") || "none"}` }));
+    h("div", { text: c.btxt.token ? "Buyer secret present" : "Buyer secret absent" }),
+    h("div", { text: handed ? "Handover in place" : nsMatch ? "Nameservers match, buyer secret missing" : "Handover not in place" }),
+    h("div", { class: "faint", text: `Registry nameservers: ${c.rdap.ns.join(", ") || "none"}` }));
 }
 
 async function renderDeed(id) {
@@ -592,14 +595,15 @@ async function renderDeed(id) {
     view.appendChild(h("div", { class: "card" }, h("h3", { text: "How the seller proves the handover" }),
       h("ol", { class: "hint", style: "margin:0;padding-left:20px" },
         h("li", { text: "Publish the record above, then take an observation BEFORE you move the domain. This baseline shows that you control it and that nothing had changed yet. A handover with no baseline is never paid: both sides are refunded." }),
-        h("li", { text: d.mode === "transfer" ? `Transfer the domain to the buyer's registrar (IANA ID ${d.registrar_id}).` : `Change the domain's nameservers at your registrar to: ${d.nameservers.join(", ")}.` }),
-        h("li", { text: "Take another observation once the registry shows the change, so it is seen in two observations a full gap apart." }),
+        h("li", { text: `Change the domain's nameservers at your registrar to: ${d.nameservers.join(", ")}.` }),
+        h("li", { text: `The buyer then publishes their secret as a TXT record at _namedeed-buyer.${d.domain} in the zone at those nameservers. Without it nobody is paid.` }),
+        h("li", { text: "Take another observation once the registry shows the change and the secret is served, so it is seen in two observations a full gap apart." }),
         h("li", { text: `Wait ${fmtDuration(Number(d.min_gap_seconds) * 1000)}, then issue the ruling. Do all of this before ${fmtTime(d.deadline)}.` }))));
   }
 
   const gapMs = Number(d.min_gap_seconds) * 1000;
   view.appendChild(h("div", { class: "card" }, h("h3", { text: "Observations" }),
-    h("p", { class: "hint", text: `Mode: ${d.mode === "transfer" ? "registrar transfer" : "nameserver delegation"}. A proof counts once it holds for ${fmtDuration(gapMs)}.` }),
+    h("p", { class: "hint", text: `Handover = registry nameservers match AND the buyer's secret is served from that zone. A proof counts once it holds for ${fmtDuration(gapMs)}.` }),
     d.observations.length ? h("div", { style: "display:grid;gap:8px" }, d.observations.map((o) => obsCard(o, d))) : h("p", { class: "faint", text: "None yet." }),
     d.facts ? h("div", { class: "facts" }, FACT_LABELS.map(([k, label]) => h("div", { class: "fact " + (d.facts[k] ? "y" : "n"), text: (d.facts[k] ? "Yes · " : "No · ") + label }))) : null));
 
@@ -608,7 +612,7 @@ async function renderDeed(id) {
     kv([
       ["Buyer", h("span", { class: "mono", text: d.buyer })], ["Seller", h("span", { class: "mono", text: d.seller })],
       ["Price", `${weiToGen(d.price)} GEN`], ["Seller bond", `${weiToGen(d.seller_bond)} GEN`], ["Deadline", fmtTime(d.deadline)],
-      ["Buyer registrar", d.registrar_id || "not used"],
+      ["Buyer secret hash", h("span", { class: "mono", text: d.buyer_proof_hash })],
       ["Nameservers", h("div", { class: "chips" }, d.nameservers.map((n) => h("span", { class: "chip mono", text: n })))],
       ["Evidence hosts", d.evidence_hosts.join(", ")],
     ])));

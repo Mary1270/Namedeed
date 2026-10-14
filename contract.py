@@ -16,11 +16,11 @@ CHALLENGE_LABEL = "_namedeed"
 RECORD_TYPE = "TXT"
 VALID_OUTCOMES = ("HANDOVER_COMPLETE", "PARTIAL_HANDOVER", "HANDOVER_FAILED", "UNDETERMINED")
 DNS_ANSWERED = (0, 3)
-MODE_TRANSFER = "transfer"
 MODE_DELEGATION = "delegation"
+BUYER_LABEL = "_namedeed-buyer"
 
 _LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
-_REGISTRAR_ID_RE = re.compile(r"[1-9][0-9]{0,9}")
+_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
 
 def _safe_json_obj(raw) -> dict:
@@ -133,6 +133,7 @@ def _build_urls(domain: str, dns_host: str, rdap_host: str) -> dict:
     rdap_path = RDAP_HOSTS[rdap_host]["path"].format(tld=tld, domain=domain)
     return {
         "txt": f"https://{dns_host}/resolve?name={CHALLENGE_LABEL}.{domain}&type=TXT",
+        "btxt": f"https://{dns_host}/resolve?name={BUYER_LABEL}.{domain}&type=TXT",
         "rdap": f"https://{rdap_host}{rdap_path}",
     }
 
@@ -159,9 +160,10 @@ def _dns_answers(raw):
     return status, [a for a in answers[:50] if isinstance(a, dict)]
 
 
-def _observe_txt(raw, qname: str, token: str) -> dict:
+def _observe_txt(raw, qname: str, token: str, hashed: bool = False) -> dict:
     """dns.google TXT response. `token` is true only when Status is 0 and
-    a TXT answer at exactly `qname` equals the challenge token."""
+    a TXT answer at exactly `qname` equals the challenge token (or, with
+    `hashed`, hashes to it: the buyer's secret, which only the buyer knows)."""
     status, answers = _dns_answers(raw)
     if status is None:
         return {"err": True, "status": -1, "token": False}
@@ -169,28 +171,12 @@ def _observe_txt(raw, qname: str, token: str) -> dict:
     if status == 0:
         for answer in answers:
             if _as_int(answer.get("type")) == 16 and _name_eq(answer.get("name"), qname):
-                if _txt_value(answer.get("data")) == token:
+                value = _txt_value(answer.get("data"))
+                if hashed:
+                    value = hashlib.sha256(value.encode()).hexdigest() if value else ""
+                if value and value == token:
                     present = True
     return {"err": False, "status": status, "token": present}
-
-
-def _rdap_registrar_id(data: dict) -> str:
-    """IANA Registrar ID of the entity whose roles include "registrar"."""
-    entities = data.get("entities")
-    for entity in (entities if isinstance(entities, list) else [])[:20]:
-        if not isinstance(entity, dict):
-            continue
-        roles = entity.get("roles")
-        if not isinstance(roles, list) or "registrar" not in [str(r).strip().lower() for r in roles]:
-            continue
-        ids = entity.get("publicIds")
-        for public_id in (ids if isinstance(ids, list) else [])[:10]:
-            if not isinstance(public_id, dict):
-                continue
-            if str(public_id.get("type", "")).strip().lower() == "iana registrar id":
-                value = str(public_id.get("identifier", "")).strip()
-                return value if _REGISTRAR_ID_RE.fullmatch(value) else ""
-    return ""
 
 
 def _observe_rdap(raw, domain: str) -> dict:
@@ -199,7 +185,7 @@ def _observe_rdap(raw, domain: str) -> dict:
     the NS records a zone operator publishes inside the zone."""
     data = _safe_json_obj(raw)
     if not data:
-        return {"err": True, "name_ok": False, "ns": [], "registrar": "", "registered": "", "changed": ""}
+        return {"err": True, "name_ok": False, "ns": [], "registered": "", "changed": ""}
     servers = set()
     nameservers = data.get("nameservers")
     for server in (nameservers if isinstance(nameservers, list) else [])[:20]:
@@ -225,7 +211,6 @@ def _observe_rdap(raw, domain: str) -> dict:
         "err": False,
         "name_ok": _name_eq(data.get("ldhName"), domain),
         "ns": sorted(servers)[:13],
-        "registrar": _rdap_registrar_id(data),
         "registered": registered.replace(microsecond=0).isoformat() if registered else "",
         "changed": changed.replace(microsecond=0).isoformat() if changed else "",
     }
@@ -234,7 +219,8 @@ def _observe_rdap(raw, domain: str) -> dict:
 def _error_core() -> dict:
     return {
         "txt": {"err": True, "status": -1, "token": False},
-        "rdap": {"err": True, "name_ok": False, "ns": [], "registrar": "", "registered": "", "changed": ""},
+        "btxt": {"err": True, "status": -1, "token": False},
+        "rdap": {"err": True, "name_ok": False, "ns": [], "registered": "", "changed": ""},
     }
 
 
@@ -249,6 +235,7 @@ def _take_observation(ctx: dict) -> dict:
             return _error_core()
     return {
         "txt": _observe_txt(_fetch_text(urls["txt"]), f"{CHALLENGE_LABEL}.{ctx['domain']}", ctx["token"]),
+        "btxt": _observe_txt(_fetch_text(urls["btxt"]), f"{BUYER_LABEL}.{ctx['domain']}", ctx["buyer_hash"], True),
         "rdap": _observe_rdap(_fetch_text(urls["rdap"]), ctx["domain"]),
     }
 
@@ -261,7 +248,7 @@ def _observe_agree(leader, mine) -> bool:
 
 def _obs_err(core) -> bool:
     try:
-        return bool(core["txt"]["err"] or core["rdap"]["err"])
+        return bool(core["txt"]["err"] or core["btxt"]["err"] or core["rdap"]["err"])
     except Exception:
         return True
 
@@ -297,17 +284,28 @@ def _token_seen(core: dict) -> bool:
     return (not txt["err"]) and txt["status"] == 0 and bool(txt["token"])
 
 
-def _handover(deed: dict, core: dict) -> bool:
-    """The handover state in one observation, read from registry data only.
-    Transfer mode: the domain is sponsored by the buyer's registrar (from
-    then on the buyer controls the delegation, so it is not checked).
-    Delegation mode: the registry delegation equals the anchored set."""
+def _ns_match(deed: dict, core: dict) -> bool:
+    """The registry delegation equals the anchored nameserver set."""
     rdap = core["rdap"]
     if rdap["err"] or not rdap["name_ok"]:
         return False
-    if deed["mode"] == MODE_TRANSFER:
-        return rdap["registrar"] == deed["registrar_id"]
     return rdap["ns"] == sorted(deed["nameservers"])
+
+
+def _buyer_proof(core: dict) -> bool:
+    """The buyer's secret (its hash is anchored at creation) is served at
+    `_namedeed-buyer.<domain>`. Only the buyer knows the secret, so only a
+    zone the buyer runs can show it."""
+    btxt = core["btxt"]
+    return (not btxt["err"]) and btxt["status"] == 0 and bool(btxt["token"])
+
+
+def _handover(deed: dict, core: dict) -> bool:
+    """The handover state in one observation: the registry delegation
+    equals the anchored set AND the zone it points to serves the buyer's
+    secret. A registry match alone never counts, because the seller can set
+    the delegation without the buyer ever controlling the zone."""
+    return _ns_match(deed, core) and _buyer_proof(core)
 
 
 def _facts(deed: dict, observations: list) -> dict:
@@ -322,16 +320,20 @@ def _facts(deed: dict, observations: list) -> dict:
     shows that anything changed after the deed was accepted.
 
     STABILITY. A handover run counts once it is seen in consecutive
-    observations spanning at least `min_gap_seconds`. In delegation mode the
-    run must reach the final observation, because the seller still controls
-    the registrar account and a later revert is the seller's doing. In
-    transfer mode any such run counts, because after the transfer only the
-    buyer can move the domain again."""
+    observations spanning at least `min_gap_seconds`. The run must reach the
+    final observation, because the seller still controls the registrar
+    account and a later revert is the seller's doing.
+
+    BUYER PROOF. A handover needs the registry delegation AND the buyer's
+    own secret served from the delegated zone. `delegation_unproven` marks
+    a delegation that matches without the buyer's proof: nobody is paid on
+    it (UNDETERMINED), so neither side gains by withholding or faking it."""
     deadline = _parse_utc(deed["deadline"])
     gap = int(deed["min_gap_seconds"])
     times = [_parse_utc(o["taken_at"]) for o in observations]
     hand = [_handover(deed, o["core"]) for o in observations]
     tok = [_token_seen(o["core"]) for o in observations]
+    nsm = [_ns_match(deed, o["core"]) for o in observations]
     last = len(observations) - 1
     final = observations[last]["core"]
 
@@ -347,11 +349,10 @@ def _facts(deed: dict, observations: list) -> dict:
             runs.append([index, index])
         elif held:
             runs[-1][1] = index
-    transfer = deed["mode"] == MODE_TRANSFER
 
     def _mature(only_baselined: bool):
         for start, end in runs:
-            if not transfer and end != last:
+            if end != last:
                 continue
             if only_baselined and (baseline is None or start <= baseline):
                 continue
@@ -365,7 +366,7 @@ def _facts(deed: dict, observations: list) -> dict:
     unbaselined = bool(chosen_any is not None and chosen is None)
     complete = bool(run_mature and times[chosen[0]] <= deadline)
     late = bool(run_mature and times[chosen[0]] > deadline)
-    buyer_holds = bool(hand[last] or (transfer and chosen_any is not None))
+    buyer_holds = bool(hand[last])
 
     control_in_time = False
     for i in range(len(observations)):
@@ -377,9 +378,9 @@ def _facts(deed: dict, observations: list) -> dict:
     answered = (not final["txt"]["err"]) and final["txt"]["status"] in DNS_ANSWERED
     registry_ok = (not final["rdap"]["err"]) and bool(final["rdap"]["name_ok"])
     ever = any(hand)
-    revert_blocks_failure = transfer and chosen_any is not None
+    unproven = bool(nsm[last] and not hand[last])
     failure = bool(past and answered and registry_ok and not hand[last] and not control_in_time
-                   and not revert_blocks_failure)
+                   and not unproven)
     return {
         "mode": deed["mode"],
         "observations": len(observations),
@@ -387,6 +388,7 @@ def _facts(deed: dict, observations: list) -> dict:
         "baseline_at": observations[baseline]["taken_at"] if baseline is not None else "",
         "handover_at_resolve": bool(hand[last]),
         "handover_ever": bool(ever),
+        "delegation_unproven": unproven,
         "buyer_holds": buyer_holds,
         "handover_since": observations[chosen[0]]["taken_at"] if run_mature else "",
         "handover_stable": bool(run_mature),
@@ -410,6 +412,8 @@ def _default_outcome(facts: dict) -> str:
         return "PARTIAL_HANDOVER"
     if facts["handover_unbaselined"]:
         return "UNDETERMINED"
+    if facts["delegation_unproven"]:
+        return "UNDETERMINED"
     if facts["control_in_time"] and facts["past_deadline"]:
         return "PARTIAL_HANDOVER"
     if facts["failure_shown"]:
@@ -420,13 +424,8 @@ def _default_outcome(facts: dict) -> str:
 def _allowed_outcomes(facts: dict) -> list:
     """What a jury majority may choose. The code default is always allowed.
     A proven completion may be downgraded to PARTIAL_HANDOVER (for
-    off-chain terms the code cannot see). In transfer mode the registrar
-    match proves which registrar sponsors the domain, not whose account
-    holds it, so when the default pays the seller for a handover
-    (COMPLETE, or PARTIAL with the buyer holding) a jury may also find
-    that the buyer never received the domain and choose UNDETERMINED
-    (refund both) or HANDOVER_FAILED. UNDETERMINED is otherwise allowed only
-    while the buyer does not already hold the domain. Nothing is ever
+    off-chain terms the code cannot see). UNDETERMINED is otherwise allowed
+    only while the buyer does not already hold the domain. Nothing is ever
     allowed above what the facts prove."""
     default = _default_outcome(facts)
     allowed = {default}
@@ -434,10 +433,6 @@ def _allowed_outcomes(facts: dict) -> list:
         allowed.add("PARTIAL_HANDOVER")
     if not facts["buyer_holds"]:
         allowed.add("UNDETERMINED")
-    pays_seller = default == "HANDOVER_COMPLETE" or (default == "PARTIAL_HANDOVER" and facts["buyer_holds"])
-    if facts["mode"] == MODE_TRANSFER and pays_seller:
-        allowed.add("UNDETERMINED")
-        allowed.add("HANDOVER_FAILED")
     return [o for o in VALID_OUTCOMES if o in allowed]
 
 
@@ -471,7 +466,7 @@ def _explain(facts: dict, outcome: str) -> str:
 
 
 def _deed_view(deed: dict) -> dict:
-    keys = ("domain", "handover_terms", "nameservers", "deadline", "min_gap_seconds", "mode", "registrar_id")
+    keys = ("domain", "handover_terms", "nameservers", "deadline", "min_gap_seconds", "mode", "buyer_proof_hash")
     return {k: deed[k] for k in keys}
 
 
@@ -534,9 +529,8 @@ class NameDeed(gl.Contract):
 
     ANCHORS (on-chain before any dispute)
     Domain, record type (TXT), deadline, the buyer's nameserver set, the
-    buyer's IANA registrar ID (optional; when set the deed is in TRANSFER
-    mode, otherwise DELEGATION mode), the two evidence hosts and the
-    minimum gap between observations. Every fetched URL is built from
+    hash of the buyer's secret, the two evidence hosts and the minimum gap
+    between observations. Every fetched URL is built from
     these anchors; no party supplies a URL.
 
     HANDSHAKE NONCE
@@ -546,10 +540,14 @@ class NameDeed(gl.Contract):
     handover itself, because after a switch the buyer runs the zone.
 
     HANDOVER PROOF (registry data only)
-    TRANSFER mode: the RDAP registrar entity carries the buyer's IANA ID.
-    DELEGATION mode: the RDAP `nameservers` (the registry delegation, not
-    the zone's own NS records) equal the anchored set. Zone content, which
-    either party may control, never decides a handover.
+    Two things must hold in the same observation: (1) the RDAP
+    `nameservers` (the registry delegation, not the zone's own NS records)
+    equal the anchored set, and (2) the zone that delegation points to
+    serves the buyer's secret at `_namedeed-buyer.<domain>` (its sha256
+    equals the hash anchored at creation). Only the buyer knows the secret,
+    so a registry match alone never pays the seller: it proves that the
+    buyer runs the zone, not merely that the seller changed a setting.
+    A delegation that matches without the secret is UNDETERMINED.
 
     BASELINE
     A handover counts only if an earlier observation shows the challenge
@@ -797,22 +795,23 @@ class NameDeed(gl.Contract):
         evidence_hosts: str,
         handover_terms: str,
         seller_bond: str,
-        buyer_registrar_id: str = "",
+        buyer_proof_hash: str = "",
         min_gap_hours: int = 1,
     ) -> str:
         """The caller is the buyer and `gl.message.value` is the price.
         `seller_bond` (wei) is what the seller must post to accept.
         `nameservers` is the buyer's set; `evidence_hosts` is
-        "dns.google,<rdap host>"; `buyer_registrar_id` is the buyer's IANA
-        registrar ID for a registrar transfer, or "" for a delegation-only
-        handover; `min_gap_hours` is the stability gap. An invalid call does
+        "dns.google,<rdap host>"; `buyer_proof_hash` is sha256 (64 lowercase
+        hex) of a secret only the buyer knows; the buyer later publishes the
+        secret itself as a TXT record at `_namedeed-buyer.<domain>` in the
+        zone it runs; `min_gap_hours` is the stability gap. An invalid call does
         not revert: it returns {"rejected": true, ...} and credits the GEN
         sent to the caller's withdrawable balance."""
         self._received()
         try:
             return self._create_deed_checked(
                 seller, domain, deadline_iso, nameservers, evidence_hosts, handover_terms, seller_bond,
-                buyer_registrar_id, min_gap_hours,
+                buyer_proof_hash, min_gap_hours,
             )
         except Exception as err:
             return self._reject(str(err) or type(err).__name__)
@@ -826,7 +825,7 @@ class NameDeed(gl.Contract):
         evidence_hosts: str,
         handover_terms: str,
         seller_bond: str,
-        buyer_registrar_id: str,
+        buyer_proof_hash: str,
         min_gap_hours: int,
     ) -> str:
         """All validation runs before the first write."""
@@ -861,9 +860,9 @@ class NameDeed(gl.Contract):
             )
         dns_host, rdap_host = self._parse_hosts(evidence_hosts, domain_norm)
 
-        registrar_id = str(buyer_registrar_id or "").strip()
-        if registrar_id and not _REGISTRAR_ID_RE.fullmatch(registrar_id):
-            raise gl.vm.UserError("buyer_registrar_id must be the IANA registrar ID (digits) or empty")
+        proof_hash = str(buyer_proof_hash or "").strip().lower()
+        if not _HASH_RE.fullmatch(proof_hash):
+            raise gl.vm.UserError("buyer_proof_hash must be the sha256 of the buyer's secret (64 hex characters)")
 
         terms = str(handover_terms or "")
         if not terms.strip():
@@ -884,8 +883,8 @@ class NameDeed(gl.Contract):
             "domain": domain_norm,
             "record_type": RECORD_TYPE,
             "nameservers": servers,
-            "registrar_id": registrar_id,
-            "mode": MODE_TRANSFER if registrar_id else MODE_DELEGATION,
+            "buyer_proof_hash": proof_hash,
+            "mode": MODE_DELEGATION,
             "evidence_hosts": [dns_host, rdap_host],
             "dns_host": dns_host,
             "rdap_host": rdap_host,
@@ -965,6 +964,7 @@ class NameDeed(gl.Contract):
         return {
             "domain": deed["domain"],
             "token": deed["challenge_token"],
+            "buyer_hash": deed["buyer_proof_hash"],
             "dns_host": deed["dns_host"],
             "rdap_host": deed["rdap_host"],
             "urls": _build_urls(deed["domain"], deed["dns_host"], deed["rdap_host"]),
@@ -995,7 +995,7 @@ class NameDeed(gl.Contract):
         evidence deadline. Records one frozen observation of the challenge
         TXT record and the registry data. Recommended order for an honest
         seller: publish the TXT record and observe (control), then switch
-        the delegation or complete the registrar transfer and observe again
+        the delegation and observe again
         (handover), then wait the gap and call `issue_ruling`."""
         deed = self._load(deed_id)
         if deed["status"] not in ("active", "observing"):
@@ -1803,7 +1803,9 @@ class NameDeed(gl.Contract):
         if not deed["challenge_token"]:
             raise gl.vm.UserError("The deed has not been accepted yet, so there is no challenge")
         return json.dumps(
-            {"name": deed["challenge_name"], "type": deed["record_type"], "value": deed["challenge_token"]},
+            {"name": deed["challenge_name"], "type": deed["record_type"], "value": deed["challenge_token"],
+             "buyer_record": {"name": f"{BUYER_LABEL}.{deed['domain']}", "type": deed["record_type"],
+                              "value_sha256": deed["buyer_proof_hash"]}},
             sort_keys=True,
         )
 
