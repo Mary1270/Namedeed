@@ -54,7 +54,7 @@ class TestInvalidDepositsAreRefunded(unittest.TestCase):
     def test_every_invalid_create_input_refunds_the_whole_value(self):
         cases = [
             dict(price=0), dict(bond=0), dict(bond="abc"), dict(domain=""), dict(domain="a b.com"),
-            dict(nameservers="one.net"), dict(hosts="dns.google"), dict(registrar="x1"), dict(gap_hours=0),
+            dict(nameservers="one.net"), dict(hosts="dns.google"), dict(proof="x1"), dict(gap_hours=0),
             dict(deadline_in=1), dict(seller=BUYER), dict(terms=""),
         ]
         for kw in cases:

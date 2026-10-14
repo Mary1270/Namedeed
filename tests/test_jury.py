@@ -365,39 +365,6 @@ class TestClosePanelAfterFailure(JuryBase):
         self.assertEqual(pending(self.c, BUYER), PRICE + BOND)
 
 
-class TestClosePanelTransferReceiptDispute(JuryBase):
-    """Transfer mode: the registrar matched, but the buyer says the domain
-    never reached their account. A registrar match proves which registrar
-    sponsors the domain, not whose account holds it."""
-    flow = staticmethod(lambda c: honest_handover(c, transfer=True))
-
-    def setUp(self):
-        super().setUp()
-        self.selected = self.panel()
-
-    def test_jury_can_refund_when_the_buyer_never_received_the_domain(self):
-        self.vote(self.selected, {a.lower(): "UNDETERMINED" for a in self.selected})
-        deed = self.close(plausible=True)
-        self.assertEqual(self.world.llm_calls, 2)
-        self.assertEqual(deed["final_outcome"], "UNDETERMINED")
-        self.assertEqual(pending(self.c, BUYER), PRICE + APPEAL_BOND)
-        self.assertEqual(pending(self.c, SELLER), BOND)
-
-    def test_jury_can_rule_failure_when_the_transfer_went_to_the_sellers_own_account(self):
-        self.vote(self.selected, {a.lower(): "HANDOVER_FAILED" for a in self.selected})
-        deed = self.close(plausible=True)
-        self.assertEqual(deed["final_outcome"], "HANDOVER_FAILED")
-        self.assertEqual(pending(self.c, BUYER), PRICE + BOND + APPEAL_BOND)
-        self.assertEqual(pending(self.c, SELLER), 0)
-
-    def test_the_gate_still_has_to_agree(self):
-        self.vote(self.selected, {a.lower(): "HANDOVER_FAILED" for a in self.selected})
-        deed = self.close(plausible=False)
-        self.assertFalse(deed["jury"]["verification_passed"])
-        self.assertEqual(deed["final_outcome"], "HANDOVER_COMPLETE")
-        self.assertEqual(pending(self.c, SELLER), PRICE + BOND)
-
-
 class TestStuckAppeal(JuryBase):
     def test_contested_recovery(self):
         self.contest()

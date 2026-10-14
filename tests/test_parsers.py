@@ -102,15 +102,14 @@ class TestTxtParser(unittest.TestCase):
 
 class TestRdapParser(unittest.TestCase):
     def rdap(self, **kw):
-        body = json.loads(rdap_json("example.com", ["NS1.B.NET", "ns2.b.net."], "292",
+        body = json.loads(rdap_json("example.com", ["NS1.B.NET", "ns2.b.net."],
                                     changed="2026-05-30T08:00:00Z"))
         body.update(kw)
         return json.dumps(body)
 
     def test_parses_the_live_verisign_shape(self):
         out = M._observe_rdap(self.rdap(), "example.com")
-        self.assertEqual(out, {"err": False, "name_ok": True, "ns": ["ns1.b.net", "ns2.b.net"], "registrar": "292",
-                               "registered": "2015-03-01T00:00:00+00:00", "changed": "2026-05-30T08:00:00+00:00"})
+        self.assertEqual(out, {"err": False, "name_ok": True, "ns": ["ns1.b.net", "ns2.b.net"], "registered": "2015-03-01T00:00:00+00:00", "changed": "2026-05-30T08:00:00+00:00"})
 
     def test_name_mismatch(self):
         self.assertFalse(M._observe_rdap(self.rdap(ldhName="OTHER.COM"), "example.com")["name_ok"])
@@ -126,23 +125,9 @@ class TestRdapParser(unittest.TestCase):
         del body["nameservers"]
         self.assertEqual(M._observe_rdap(json.dumps(body), "example.com")["ns"], [])
 
-    def test_registrar_id_only_from_the_registrar_role(self):
-        entities = [{"roles": ["registrant"], "publicIds": [{"type": "IANA Registrar ID", "identifier": "9"}]},
-                    {"roles": ["Registrar"], "publicIds": [{"type": "iana registrar id", "identifier": " 777 "}]}]
-        self.assertEqual(M._observe_rdap(self.rdap(entities=entities), "example.com")["registrar"], "777")
-
-    def test_registrar_id_must_be_digits(self):
-        for ident in ("abc", "0", "", None, "12x"):
-            entities = [{"roles": ["registrar"], "publicIds": [{"type": "IANA Registrar ID", "identifier": ident}]}]
-            self.assertEqual(M._observe_rdap(self.rdap(entities=entities), "example.com")["registrar"], "")
-
-    def test_registrar_without_public_ids(self):
-        entities = [{"roles": ["registrar"]}, "junk", {"roles": "registrar"}]
-        self.assertEqual(M._observe_rdap(self.rdap(entities=entities), "example.com")["registrar"], "")
-
     def test_not_found_body_is_not_an_error_but_not_ok(self):
         out = M._observe_rdap('{"errorCode": 404, "title": "Not Found"}', "example.com")
-        self.assertEqual((out["err"], out["name_ok"], out["ns"], out["registrar"]), (False, False, [], ""))
+        self.assertEqual((out["err"], out["name_ok"], out["ns"]), (False, False, []))
 
     def test_garbage_is_error(self):
         for raw in ("", "<html>", "[]"):
@@ -190,8 +175,9 @@ class TestHostHelpers(unittest.TestCase):
 
     def test_build_urls_use_only_anchored_hosts(self):
         urls = M._build_urls("example.com", "dns.google", "rdap.verisign.com")
-        self.assertEqual(set(urls), {"txt", "rdap"})
+        self.assertEqual(set(urls), {"txt", "btxt", "rdap"})
         self.assertEqual(urls["txt"], "https://dns.google/resolve?name=_namedeed.example.com&type=TXT")
+        self.assertEqual(urls["btxt"], "https://dns.google/resolve?name=_namedeed-buyer.example.com&type=TXT")
         self.assertEqual(urls["rdap"], "https://rdap.verisign.com/com/v1/domain/example.com")
         pir = M._build_urls("example.org", "dns.google", "rdap.publicinterestregistry.org")
         self.assertEqual(pir["rdap"], "https://rdap.publicinterestregistry.org/rdap/domain/example.org")

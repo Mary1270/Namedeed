@@ -5,7 +5,7 @@ import json
 import unittest
 
 from _bootstrap import (
-    M, CLOCK, BUYER, SELLER, STRANGER, NS, SELLER_NS, OTHER_NS, BUYER_REGISTRAR, OTHER_REGISTRAR, SELLER_REGISTRAR,
+    M, CLOCK, BUYER, SELLER, STRANGER, NS, SELLER_NS, OTHER_NS,
     HOUR, DAY, MIN, PRICE, BOND,
     make_contract, set_caller, active_deed, deed_of, world_for, observe, rule, honest_handover,
     close_window, pending,
@@ -89,29 +89,6 @@ class TestBuyerAsAdversary(unittest.TestCase):
         observe(self.c, deed_id, world, caller=SELLER)
         self.assertEqual(deed_of(self.c, deed_id)["observation_counts"], {"buyer": 3, "seller": 1})
 
-    def test_buyer_moving_the_domain_away_after_a_transfer_cannot_frame_the_seller(self):
-        deed_id, world = honest_handover(self.c, transfer=True, deadline_in=30 * DAY)
-        self.assertEqual(deed_of(self.c, deed_id)["ruling"], "HANDOVER_COMPLETE")
-
-        c2 = make_contract()
-        deed2 = active_deed(c2, registrar=BUYER_REGISTRAR)
-        w2 = world_for(c2, deed2)
-        w2.seller_publishes()
-        CLOCK.advance(10 * MIN)
-        observe(c2, deed2, w2)
-        w2.transfer_registrar()
-        CLOCK.advance(10 * MIN)
-        observe(c2, deed2, w2)
-        CLOCK.advance(HOUR + MIN)
-        observe(c2, deed2, w2)
-        w2.transfer_registrar(OTHER_REGISTRAR)
-        w2.switch_delegation(OTHER_NS)
-        CLOCK.advance(8 * HOUR)
-        rule(c2, deed2, w2, caller=BUYER)
-        deed = deed_of(c2, deed2)
-        self.assertEqual(deed["ruling"], "HANDOVER_COMPLETE")
-        self.assertTrue(deed["facts"]["buyer_holds"])
-
     def test_buyer_publishing_a_token_in_their_own_zone_does_not_change_an_honest_completion(self):
         deed_id = active_deed(self.c)
         world = world_for(self.c, deed_id)
@@ -188,45 +165,6 @@ class TestSellerAsAdversary(unittest.TestCase):
         self.assertEqual(deed["ruling"], "HANDOVER_FAILED")
         settle(self.c, deed_id)
         self.assertEqual(pending(self.c, BUYER), PRICE + BOND)
-
-    def test_transfer_match_flashed_once_then_reverted_is_a_failure(self):
-        deed_id = active_deed(self.c, registrar=BUYER_REGISTRAR)
-        world = world_for(self.c, deed_id)
-        world.seller_publishes()
-        CLOCK.advance(10 * MIN)
-        observe(self.c, deed_id, world)
-        world.seller_unpublishes()
-        world.transfer_registrar()
-        CLOCK.advance(10 * MIN)
-        observe(self.c, deed_id, world)
-        world.transfer_registrar(SELLER_REGISTRAR)
-        CLOCK.advance(7 * HOUR)
-        rule(self.c, deed_id, world)
-        deed = deed_of(self.c, deed_id)
-        self.assertTrue(deed["facts"]["handover_ever"])
-        self.assertFalse(deed["facts"]["handover_stable"])
-        self.assertEqual(deed["ruling"], "HANDOVER_FAILED")
-        settle(self.c, deed_id)
-        self.assertEqual(pending(self.c, BUYER), PRICE + BOND)
-
-    def test_transfer_match_seen_twice_but_closer_than_the_gap_then_reverted_is_a_failure(self):
-        deed_id = active_deed(self.c, registrar=BUYER_REGISTRAR, gap_hours=2)
-        world = world_for(self.c, deed_id)
-        world.seller_publishes()
-        CLOCK.advance(10 * MIN)
-        observe(self.c, deed_id, world)
-        world.seller_unpublishes()
-        world.transfer_registrar()
-        CLOCK.advance(10 * MIN)
-        observe(self.c, deed_id, world)
-        CLOCK.advance(30 * MIN)
-        observe(self.c, deed_id, world, caller=BUYER)
-        world.transfer_registrar(SELLER_REGISTRAR)
-        CLOCK.advance(7 * HOUR)
-        rule(self.c, deed_id, world)
-        deed = deed_of(self.c, deed_id)
-        self.assertFalse(deed["facts"]["handover_stable"])
-        self.assertEqual(deed["ruling"], "HANDOVER_FAILED")
 
     def test_delegation_flash_before_the_baseline_is_ignored(self):
         deed_id = active_deed(self.c)
@@ -371,30 +309,6 @@ class TestSellerAsAdversary(unittest.TestCase):
         rule(self.c, deed_id, world)
         self.assertFalse(deed_of(self.c, deed_id)["facts"]["handover_ever"])
 
-    def test_transfer_mode_ignores_a_delegation_only_switch(self):
-        deed_id = active_deed(self.c, registrar=BUYER_REGISTRAR)
-        world = world_for(self.c, deed_id)
-        world.switch_delegation()
-        CLOCK.advance(10 * MIN)
-        observe(self.c, deed_id, world)
-        CLOCK.advance(HOUR + MIN)
-        observe(self.c, deed_id, world)
-        CLOCK.advance(7 * HOUR)
-        rule(self.c, deed_id, world)
-        self.assertEqual(deed_of(self.c, deed_id)["ruling"], "HANDOVER_FAILED")
-
-    def test_transfer_to_the_wrong_registrar_is_not_a_handover(self):
-        deed_id = active_deed(self.c, registrar=BUYER_REGISTRAR)
-        world = world_for(self.c, deed_id)
-        world.transfer_registrar(OTHER_REGISTRAR)
-        CLOCK.advance(10 * MIN)
-        observe(self.c, deed_id, world)
-        CLOCK.advance(HOUR + MIN)
-        observe(self.c, deed_id, world)
-        CLOCK.advance(7 * HOUR)
-        rule(self.c, deed_id, world)
-        self.assertEqual(deed_of(self.c, deed_id)["ruling"], "HANDOVER_FAILED")
-
     def test_wrong_rdap_object_is_not_a_handover(self):
         deed_id = active_deed(self.c)
         world = world_for(self.c, deed_id)
@@ -412,6 +326,62 @@ class TestSellerAsAdversary(unittest.TestCase):
         self.assertEqual(deed["ruling"], "UNDETERMINED")
 
 
+class TestRegistryMatchAloneNeverPaysTheSeller(unittest.TestCase):
+    """Steward objection: a registry match must not pay the seller unless the
+    buyer's own control of the delegated zone is shown too."""
+
+    def setUp(self):
+        self.c = make_contract()
+
+    def run_case(self, forge=False):
+        deed_id = active_deed(self.c)
+        world = world_for(self.c, deed_id)
+        world.seller_publishes()
+        if forge:
+            world.seller_forges_proof()
+            world.seller_forges_proof("guessed-secret")
+        CLOCK.advance(10 * MIN)
+        observe(self.c, deed_id, world)
+        world.switch_delegation()
+        world.buyer_withholds_proof()
+        CLOCK.advance(10 * MIN)
+        observe(self.c, deed_id, world)
+        CLOCK.advance(HOUR + MIN)
+        observe(self.c, deed_id, world)
+        CLOCK.advance(7 * HOUR)
+        rule(self.c, deed_id, world)
+        return deed_id
+
+    def test_seller_switching_the_delegation_without_the_buyers_proof_is_not_paid(self):
+        deed_id = self.run_case()
+        deed = deed_of(self.c, deed_id)
+        self.assertTrue(deed["facts"]["delegation_unproven"])
+        self.assertFalse(deed["facts"]["complete_proven"])
+        self.assertEqual(deed["ruling"], "UNDETERMINED")
+        settle(self.c, deed_id)
+        self.assertEqual((pending(self.c, BUYER), pending(self.c, SELLER)), (PRICE, BOND))
+
+    def test_a_forged_or_guessed_proof_in_the_sellers_own_zone_changes_nothing(self):
+        deed_id = self.run_case(forge=True)
+        deed = deed_of(self.c, deed_id)
+        self.assertFalse(deed["facts"]["handover_ever"])
+        self.assertEqual(deed["ruling"], "UNDETERMINED")
+        settle(self.c, deed_id)
+        self.assertEqual((pending(self.c, BUYER), pending(self.c, SELLER)), (PRICE, BOND))
+
+    def test_the_proof_must_be_the_buyers_secret_not_its_hash(self):
+        deed_id = active_deed(self.c)
+        world = world_for(self.c, deed_id)
+        world.seller_publishes()
+        CLOCK.advance(10 * MIN)
+        observe(self.c, deed_id, world)
+        world.switch_delegation()
+        world.zones["buyer"]["btxt"] = [deed_of(self.c, deed_id)["buyer_proof_hash"]]
+        CLOCK.advance(10 * MIN)
+        observe(self.c, deed_id, world)
+        self.assertFalse(deed_of(self.c, deed_id)["observations"][-1]["core"]["btxt"]["token"])
+
+
 class TestHonestPaths(unittest.TestCase):
     def setUp(self):
         self.c = make_contract()
@@ -421,12 +391,6 @@ class TestHonestPaths(unittest.TestCase):
         deed = deed_of(self.c, deed_id)
         self.assertEqual(deed["ruling"], "HANDOVER_COMPLETE")
         self.assertFalse(deed["facts"]["past_deadline"])
-
-    def test_registrar_transfer_completes(self):
-        deed_id, _ = honest_handover(self.c, transfer=True)
-        deed = deed_of(self.c, deed_id)
-        self.assertEqual(deed["mode"], "transfer")
-        self.assertEqual(deed["ruling"], "HANDOVER_COMPLETE")
 
     def test_handover_without_a_control_proof_before_it_is_never_complete(self):
         deed_id = active_deed(self.c)
@@ -444,37 +408,6 @@ class TestHonestPaths(unittest.TestCase):
         self.assertTrue(deed["facts"]["handover_unbaselined"])
         settle(self.c, deed_id)
         self.assertEqual((pending(self.c, BUYER), pending(self.c, SELLER)), (PRICE, BOND))
-
-    def test_domain_already_at_the_buyers_registrar_cannot_pay_the_seller(self):
-        deed_id = active_deed(self.c, registrar=BUYER_REGISTRAR)
-        world = world_for(self.c, deed_id)
-        world.transfer_registrar()
-        CLOCK.advance(10 * MIN)
-        observe(self.c, deed_id, world)
-        CLOCK.advance(HOUR + MIN)
-        observe(self.c, deed_id, world)
-        CLOCK.advance(7 * HOUR)
-        rule(self.c, deed_id, world)
-        deed = deed_of(self.c, deed_id)
-        self.assertEqual(deed["ruling"], "UNDETERMINED")
-        self.assertFalse(deed["facts"]["complete_proven"])
-        settle(self.c, deed_id)
-        self.assertEqual((pending(self.c, BUYER), pending(self.c, SELLER)), (PRICE, BOND))
-
-    def test_seller_who_shows_control_after_the_domain_already_matches_still_cannot_complete(self):
-        deed_id = active_deed(self.c, registrar=BUYER_REGISTRAR)
-        world = world_for(self.c, deed_id)
-        world.transfer_registrar()
-        world.seller_publishes()
-        CLOCK.advance(10 * MIN)
-        observe(self.c, deed_id, world)
-        CLOCK.advance(HOUR + MIN)
-        observe(self.c, deed_id, world)
-        CLOCK.advance(7 * HOUR)
-        rule(self.c, deed_id, world)
-        deed = deed_of(self.c, deed_id)
-        self.assertEqual(deed["ruling"], "UNDETERMINED")
-        self.assertFalse(deed["facts"]["baseline_seen"])
 
     def test_late_but_stable_handover_is_partial_and_pays_the_seller_less_the_penalty(self):
         deed_id = active_deed(self.c, deadline_in=2 * HOUR)

@@ -74,9 +74,8 @@ DOMAIN = "example.com"
 NS = ["ns1.buyer-dns.net", "ns2.buyer-dns.net"]
 SELLER_NS = ["ns1.seller-host.net", "ns2.seller-host.net"]
 OTHER_NS = ["ns1.third-party.net", "ns2.third-party.net"]
-SELLER_REGISTRAR = "1001"
-BUYER_REGISTRAR = "2002"
-OTHER_REGISTRAR = "3003"
+BUYER_SECRET = "buyer-only-secret-7f3a"
+BUYER_HASH = hashlib.sha256(BUYER_SECRET.encode()).hexdigest()
 HOSTS = "dns.google,rdap.verisign.com"
 PRICE = 1000
 BOND = 400
@@ -156,7 +155,7 @@ def dns_json(name, rtype, status=0, answers=None, ttl=300):
     return json.dumps(body)
 
 
-def rdap_json(domain, nameservers, registrar, registered="2015-03-01T00:00:00Z", changed="2026-05-01T00:00:00Z"):
+def rdap_json(domain, nameservers, registered="2015-03-01T00:00:00Z", changed="2026-05-01T00:00:00Z"):
     events = [{"eventAction": "registration", "eventDate": registered},
               {"eventAction": "expiration", "eventDate": "2030-03-01T00:00:00Z"},
               {"eventAction": "last changed", "eventDate": changed},
@@ -164,9 +163,7 @@ def rdap_json(domain, nameservers, registrar, registered="2015-03-01T00:00:00Z",
     return json.dumps({
         "objectClassName": "domain", "ldhName": domain.upper(), "events": events,
         "nameservers": [{"objectClassName": "nameserver", "ldhName": h.upper()} for h in nameservers],
-        "entities": [{"objectClassName": "entity", "roles": ["registrar"],
-                      "publicIds": [{"type": "IANA Registrar ID", "identifier": registrar}],
-                      "entities": [{"roles": ["abuse"]}]}],
+        "entities": [{"objectClassName": "entity", "roles": ["registrar"], "entities": [{"roles": ["abuse"]}]}],
     })
 
 
@@ -177,12 +174,11 @@ class World:
         self.domain = domain
         self.token = token
         self.registry_ns = list(SELLER_NS)
-        self.registrar = SELLER_REGISTRAR
         self.rdap_name = domain
         self.zones = {
-            "seller": {"txt": ["v=spf1 -all"], "apex_ns": list(SELLER_NS)},
-            "buyer": {"txt": [], "apex_ns": list(NS)},
-            "other": {"txt": [], "apex_ns": list(OTHER_NS)},
+            "seller": {"txt": ["v=spf1 -all"], "btxt": [], "apex_ns": list(SELLER_NS)},
+            "buyer": {"txt": [], "btxt": [BUYER_SECRET], "apex_ns": list(NS)},
+            "other": {"txt": [], "btxt": [], "apex_ns": list(OTHER_NS)},
         }
         self.txt_status_override = None
         self.fail = set()
@@ -210,29 +206,33 @@ class World:
     def buyer_publishes(self, value=None):
         self.zones["buyer"]["txt"].append(self.token if value is None else value)
 
+    def buyer_withholds_proof(self):
+        self.zones["buyer"]["btxt"] = []
+
+    def seller_forges_proof(self, value=None):
+        self.zones["seller"]["btxt"].append(BUYER_HASH if value is None else value)
+
     def switch_delegation(self, servers=None):
         self.registry_ns = list(NS if servers is None else servers)
 
-    def transfer_registrar(self, registrar=BUYER_REGISTRAR):
-        self.registrar = registrar
-
     def render(self, url, mode="text"):
         self.calls.append(url)
-        kind = "txt" if "type=TXT" in url else "rdap"
-        if kind in self.fail:
+        kind = ("btxt" if M.BUYER_LABEL + "." in url else "txt") if "type=TXT" in url else "rdap"
+        if kind in self.fail or (kind == "btxt" and "txt" in self.fail):
             raise RuntimeError("fetch failed")
-        if kind in self.garbage:
+        if kind in self.garbage or (kind == "btxt" and "txt" in self.garbage):
             return "<html>not json</html>"
         self.ttl += 1
-        if kind == "txt":
-            qname = f"{M.CHALLENGE_LABEL}.{self.domain}"
-            values = self.zones[self.operator()]["txt"]
+        if kind in ("txt", "btxt"):
+            label = M.BUYER_LABEL if kind == "btxt" else M.CHALLENGE_LABEL
+            qname = f"{label}.{self.domain}"
+            values = self.zones[self.operator()][kind]
             status = 0 if values else 3
             if self.txt_status_override is not None:
                 status = self.txt_status_override
             answers = [(qname + ".", 16, v) for v in values] if status == 0 else None
             return dns_json(qname, 16, status, answers, self.ttl)
-        return rdap_json(self.rdap_name, self.registry_ns, self.registrar)
+        return rdap_json(self.rdap_name, self.registry_ns)
 
     def exec_prompt(self, prompt, response_format="json"):
         self.llm_calls += 1
@@ -251,12 +251,12 @@ class World:
 
 
 def create(c, price=PRICE, bond=BOND, deadline_in=6 * HOUR, gap_hours=1, domain=DOMAIN, nameservers=None,
-           hosts=HOSTS, terms="Move the domain to the buyer as agreed", registrar="", seller=SELLER, caller=BUYER):
+           hosts=HOSTS, terms="Move the domain to the buyer as agreed", proof=BUYER_HASH, seller=SELLER, caller=BUYER):
     set_caller(caller)
     ns_csv = ",".join(NS) if nameservers is None else nameservers
     return call_payable(c, "create_deed", price, seller, domain,
                         iso(CLOCK.t + _dt.timedelta(seconds=deadline_in)), ns_csv, hosts, terms,
-                        str(bond), registrar, gap_hours)
+                        str(bond), proof, gap_hours)
 
 
 def accept(c, deed_id, bond=BOND, caller=SELLER):
@@ -291,21 +291,19 @@ def rule(c, deed_id, world, caller=STRANGER):
         return c.issue_ruling(deed_id)
 
 
-def honest_handover(c, transfer=False, **kw):
+def honest_handover(c, proof=True, **kw):
     """An honest seller: publish the token, observe, hand over, observe,
-    wait the gap, rule. Returns (deed_id, world)."""
-    if transfer:
-        kw.setdefault("registrar", BUYER_REGISTRAR)
+    wait the gap, rule. The buyer's new zone serves its secret from the
+    start (proof=False models a zone that does not). Returns
+    (deed_id, world)."""
     deed_id = active_deed(c, **kw)
     world = world_for(c, deed_id)
     world.seller_publishes()
     CLOCK.advance(10 * MIN)
     observe(c, deed_id, world)
-    if transfer:
-        world.transfer_registrar()
-        world.switch_delegation()
-    else:
-        world.switch_delegation()
+    world.switch_delegation()
+    if not proof:
+        world.buyer_withholds_proof()
     CLOCK.advance(10 * MIN)
     observe(c, deed_id, world)
     CLOCK.advance(HOUR)

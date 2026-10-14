@@ -10,9 +10,10 @@ from _bootstrap import (
 )
 
 
-def core(token=True, ns=("a.b.net", "c.b.net"), registrar="292"):
+def core(token=True, ns=("a.b.net", "c.b.net"), proof=True):
     return {"txt": {"err": False, "status": 0, "token": token},
-            "rdap": {"err": False, "name_ok": True, "ns": list(ns), "registrar": registrar,
+            "btxt": {"err": False, "status": 0, "token": proof},
+            "rdap": {"err": False, "name_ok": True, "ns": list(ns),
                      "registered": "2015-03-01T00:00:00+00:00", "changed": "2026-05-01T00:00:00+00:00"}}
 
 
@@ -21,7 +22,7 @@ class TestAgree(unittest.TestCase):
         self.assertTrue(M._observe_agree({"core": core()}, {"core": core()}))
 
     def test_any_decisive_difference_disagrees(self):
-        for other in (core(token=False), core(ns=("x.y.net", "z.y.net")), core(registrar="1")):
+        for other in (core(token=False), core(ns=("x.y.net", "z.y.net")), core(proof=False)):
             self.assertFalse(M._observe_agree({"core": core()}, {"core": other}))
 
     def test_non_dicts_disagree(self):
@@ -81,9 +82,9 @@ class TestValidatorDrift(unittest.TestCase):
 
 class TestObservationGuards(unittest.TestCase):
     def ctx(self, **urls):
-        base = {"txt": "https://dns.google/x", "rdap": "https://rdap.verisign.com/x"}
+        base = {"txt": "https://dns.google/x", "btxt": "https://dns.google/y", "rdap": "https://rdap.verisign.com/x"}
         base.update(urls)
-        return {"domain": "example.com", "token": "t", "dns_host": "dns.google", "rdap_host": "rdap.verisign.com", "urls": base}
+        return {"domain": "example.com", "token": "t", "buyer_hash": "h", "dns_host": "dns.google", "rdap_host": "rdap.verisign.com", "urls": base}
 
     def test_unlisted_or_plain_http_hosts_are_never_fetched(self):
         for bad in ({"txt": "https://evil.example/x"}, {"rdap": "http://rdap.verisign.com/x"},

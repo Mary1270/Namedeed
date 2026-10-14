@@ -117,6 +117,26 @@ class TestDeployFile(unittest.TestCase):
             self.assertEqual(old.split("=")[0], new.split("=")[0])
         self.assertEqual(read("contract_short_deploy.py").split("\n"), short)
 
+    def test_evidence_variant_is_up_to_date(self):
+        expected = make_deploy.strip(make_deploy.apply_fixture(read("contract.py")), make_deploy.SHORT_WINDOWS)
+        self.assertEqual(read("contract_evidence_deploy.py"), expected)
+
+    def test_evidence_variant_changes_only_the_evidence_source(self):
+        """Settlement, appeal, jury, gate and payout code must be identical."""
+        def functions(source):
+            out = {}
+            for node in ast.walk(ast.parse(source)):
+                if isinstance(node, ast.FunctionDef):
+                    out[node.name] = ast.dump(node)
+            return out
+        base = functions(read("contract_short_deploy.py"))
+        fixture = functions(read("contract_evidence_deploy.py"))
+        differing = {name for name in base if base[name] != fixture.get(name)}
+        added = set(fixture) - set(base)
+        self.assertEqual(differing, {"_take_observation", "_observation_ctx"})
+        self.assertEqual(added, {"_fixture_observation", "_take_real_observation", "set_fixture", "evidence_source"})
+        self.assertIn("SYNTHETIC FIXTURE", read("contract_evidence_deploy.py"))
+
     def test_builder_refuses_unknown_constants(self):
         with self.assertRaises(SystemExit):
             make_deploy.strip(read("contract.py"), {"NO_SUCH_CONSTANT": 1})

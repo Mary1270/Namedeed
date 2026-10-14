@@ -26,10 +26,11 @@ class TestObserve(unittest.TestCase):
         self.assertEqual(obs["digest"], M._obs_digest(obs["core"]))
         self.assertEqual(deed["evidence_root"], M._evidence_root(deed["observations"]))
 
-    def test_fetches_only_two_urls_built_from_anchors(self):
+    def test_fetches_only_three_urls_built_from_anchors(self):
         observe(self.c, self.deed_id, self.world)
         self.assertEqual(set(self.world.calls), {
             "https://dns.google/resolve?name=_namedeed.example.com&type=TXT",
+            "https://dns.google/resolve?name=_namedeed-buyer.example.com&type=TXT",
             "https://rdap.verisign.com/com/v1/domain/example.com"})
 
     def test_observation_never_calls_the_model(self):
@@ -64,7 +65,7 @@ class TestObserve(unittest.TestCase):
             observe(self.c, pending_deed, self.world, caller=BUYER)
 
     def test_fetch_failures_are_retryable_and_not_recorded(self):
-        for kind in ("txt", "rdap"):
+        for kind in ("txt", "btxt", "rdap"):
             with self.subTest(kind=kind):
                 self.world.fail = {kind}
                 with self.assertRaises(Exception):
@@ -179,12 +180,13 @@ class TestFactsUnit(unittest.TestCase):
     """_facts and the outcome functions on hand-built observation lists."""
 
     DEED = {"deadline": "2026-06-01T18:00:00+00:00", "min_gap_seconds": 3600, "mode": "delegation",
-            "registrar_id": "", "nameservers": ["ns1.buyer-dns.net", "ns2.buyer-dns.net"]}
+            "buyer_proof_hash": "x", "nameservers": ["ns1.buyer-dns.net", "ns2.buyer-dns.net"]}
 
-    def obs(self, minute, token=False, handed=False, status=0, rdap_err=False, registrar="1001"):
+    def obs(self, minute, token=False, handed=False, status=0, rdap_err=False, proof=None):
         ns = ["ns1.buyer-dns.net", "ns2.buyer-dns.net"] if handed else ["ns1.seller-host.net", "ns2.seller-host.net"]
         core = {"txt": {"err": False, "status": status, "token": token},
-                "rdap": {"err": rdap_err, "name_ok": True, "ns": ns, "registrar": registrar, "registered": "", "changed": ""}}
+                "btxt": {"err": False, "status": 0, "token": handed if proof is None else proof},
+                "rdap": {"err": rdap_err, "name_ok": True, "ns": ns, "registered": "", "changed": ""}}
         when = "2026-06-01T12:00:00+00:00"
         import datetime
         t = datetime.datetime.fromisoformat(when) + datetime.timedelta(minutes=minute)
@@ -213,17 +215,6 @@ class TestFactsUnit(unittest.TestCase):
         self.assertTrue(f["late_handover"])
         self.assertEqual(M._default_outcome(f), "PARTIAL_HANDOVER")
 
-    def test_transfer_mode_counts_a_run_that_ended_before_the_final_observation(self):
-        a = self.obs(0, token=True, registrar="1001")
-        b = self.obs(10, registrar="2002")
-        c = self.obs(80, registrar="2002")
-        d = self.obs(500, registrar="3003")
-        f = self.facts([a, b, c, d], mode="transfer", registrar_id="2002")
-        self.assertTrue(f["complete_proven"])
-        self.assertTrue(f["buyer_holds"])
-        f = self.facts([a, b, c, d])
-        self.assertFalse(f["complete_proven"])
-
     def test_a_handover_already_in_place_at_the_first_sighting_is_never_complete(self):
         f = self.facts([self.obs(0, handed=True), self.obs(70, handed=True)])
         self.assertFalse(f["baseline_seen"])
@@ -232,38 +223,10 @@ class TestFactsUnit(unittest.TestCase):
         self.assertFalse(f["handover_pending"])
         self.assertEqual(M._default_outcome(f), "UNDETERMINED")
 
-    def test_transfer_mode_target_registrar_already_in_place_is_undetermined(self):
-        a = self.obs(0, registrar="2002")
-        b = self.obs(70, registrar="2002")
-        f = self.facts([a, b], mode="transfer", registrar_id="2002")
-        self.assertTrue(f["handover_unbaselined"])
-        self.assertEqual(M._default_outcome(f), "UNDETERMINED")
-        self.assertEqual(M._clamp_outcome("HANDOVER_COMPLETE", f), "UNDETERMINED")
-
     def test_control_after_the_handover_is_not_a_baseline(self):
         f = self.facts([self.obs(0, handed=True), self.obs(10, handed=True, token=True), self.obs(80, handed=True, token=True)])
         self.assertFalse(f["baseline_seen"])
         self.assertFalse(f["complete_proven"])
-
-    def test_a_single_match_that_never_held_does_not_block_failure_in_transfer_mode(self):
-        a = self.obs(0, token=True, registrar="1001")
-        b = self.obs(10, registrar="2002")
-        c = self.obs(400, registrar="1001")
-        f = self.facts([a, b, c], mode="transfer", registrar_id="2002")
-        self.assertFalse(f["handover_stable"])
-        self.assertTrue(f["handover_ever"])
-        self.assertFalse(f["control_in_time"])
-        self.assertTrue(f["failure_shown"])
-        self.assertEqual(M._default_outcome(f), "HANDOVER_FAILED")
-
-    def test_a_matured_transfer_that_later_reverts_still_blocks_failure(self):
-        a = self.obs(0, token=True, registrar="1001")
-        b = self.obs(10, registrar="2002")
-        c = self.obs(80, registrar="2002")
-        d = self.obs(500, registrar="1001")
-        f = self.facts([a, b, c, d], mode="transfer", registrar_id="2002")
-        self.assertTrue(f["complete_proven"])
-        self.assertFalse(f["failure_shown"])
 
     def test_failure_needs_an_answered_query_and_registry_data(self):
         late = 400
@@ -288,20 +251,29 @@ class TestFactsUnit(unittest.TestCase):
         late = self.facts([self.obs(0, token=True), self.obs(400, handed=True), self.obs(470, handed=True)])
         self.assertEqual(M._allowed_outcomes(late), ["PARTIAL_HANDOVER"])
 
-    def test_transfer_mode_lets_a_jury_find_that_the_buyer_never_received_the_domain(self):
-        a = self.obs(0, token=True, registrar="1001")
-        b = self.obs(10, registrar="2002")
-        c = self.obs(80, registrar="2002")
-        f = self.facts([a, b, c], mode="transfer", registrar_id="2002")
-        self.assertEqual(set(M._allowed_outcomes(f)),
-                         {"HANDOVER_COMPLETE", "PARTIAL_HANDOVER", "UNDETERMINED", "HANDOVER_FAILED"})
-        late = self.facts([self.obs(0, token=True, registrar="1001"), self.obs(400, registrar="2002"),
-                           self.obs(470, registrar="2002")], mode="transfer", registrar_id="2002")
-        self.assertEqual(set(M._allowed_outcomes(late)), {"PARTIAL_HANDOVER", "UNDETERMINED", "HANDOVER_FAILED"})
-        control = self.facts([self.obs(0, token=True), self.obs(60, token=True), self.obs(400)],
-                             mode="transfer", registrar_id="2002")
-        self.assertEqual(M._default_outcome(control), "PARTIAL_HANDOVER")
-        self.assertEqual(set(M._allowed_outcomes(control)), {"PARTIAL_HANDOVER", "UNDETERMINED"})
+    def test_a_registry_match_without_the_buyers_proof_never_pays_the_seller(self):
+        a = self.obs(0, token=True)
+        f = self.facts([a, self.obs(10, handed=True, proof=False), self.obs(80, handed=True, proof=False)])
+        self.assertFalse(f["complete_proven"])
+        self.assertFalse(f["handover_stable"])
+        self.assertTrue(f["delegation_unproven"])
+        self.assertFalse(f["failure_shown"])
+        self.assertEqual(M._default_outcome(f), "UNDETERMINED")
+        self.assertEqual(M._clamp_outcome("HANDOVER_COMPLETE", f), "UNDETERMINED")
+        self.assertNotIn("HANDOVER_COMPLETE", M._allowed_outcomes(f))
+        self.assertNotIn("PARTIAL_HANDOVER", M._allowed_outcomes(f))
+
+    def test_the_proof_without_the_registry_match_is_not_a_handover(self):
+        a = self.obs(0, token=True)
+        f = self.facts([a, self.obs(10, proof=True), self.obs(80, proof=True)])
+        self.assertFalse(f["handover_ever"])
+        self.assertFalse(f["complete_proven"])
+
+    def test_an_unproven_match_blocks_a_partial_ruling_for_the_seller_too(self):
+        f = self.facts([self.obs(0, token=True), self.obs(60, token=True), self.obs(70, handed=True, proof=False),
+                        self.obs(400, handed=True, proof=False)])
+        self.assertTrue(f["control_in_time"])
+        self.assertEqual(M._default_outcome(f), "UNDETERMINED")
 
     def test_backstop_forces_unproven_complete_down(self):
         for observations in ([self.obs(0), self.obs(400)], [self.obs(0, token=True), self.obs(10, handed=True), self.obs(40, handed=True)],

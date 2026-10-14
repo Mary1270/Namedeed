@@ -4,7 +4,7 @@ import json
 import unittest
 
 from _bootstrap import (
-    M, CLOCK, BUYER, SELLER, STRANGER, DOMAIN, NS, HOUR, DAY, PRICE, BOND, BUYER_REGISTRAR,
+    M, CLOCK, BUYER, SELLER, STRANGER, DOMAIN, NS, HOUR, DAY, PRICE, BOND, BUYER_HASH,
     make_contract, set_caller, create, accept, active_deed, deed_of, pending,
 )
 
@@ -25,20 +25,16 @@ class TestCreateValidation(unittest.TestCase):
         self.assertEqual((deed["price"], deed["seller_bond"]), (str(PRICE), str(BOND)))
         self.assertEqual(deed["min_gap_seconds"], 3600)
         self.assertEqual(deed["mode"], "delegation")
-        self.assertEqual(deed["registrar_id"], "")
+        self.assertEqual(deed["buyer_proof_hash"], BUYER_HASH)
         self.assertEqual(deed["status"], "proposed")
         self.assertEqual(deed["observations"], [])
         self.assertEqual(deed["challenge_name"], "_namedeed.example.com")
 
-    def test_registrar_id_selects_transfer_mode(self):
-        deed = deed_of(self.c, create(self.c, registrar=BUYER_REGISTRAR))
-        self.assertEqual((deed["mode"], deed["registrar_id"]), ("transfer", BUYER_REGISTRAR))
-
-    def test_invalid_registrar_ids_rejected(self):
-        for bad in ("0", "01", "abc", "12a", "1" * 11, "-5", "1.5"):
-            with self.subTest(registrar=bad):
+    def test_invalid_buyer_proof_hashes_rejected(self):
+        for bad in ("", "abc", "g" * 64, "a" * 63, "a" * 65, "transfer"):
+            with self.subTest(proof=bad):
                 with self.assertRaises(Exception):
-                    create(self.c, registrar=bad)
+                    create(self.c, proof=bad)
 
     def test_ids_increment(self):
         self.assertEqual(create(self.c), "deed_0")
@@ -230,7 +226,9 @@ class TestAcceptAndCancel(unittest.TestCase):
         accept(self.c, deed_id)
         info = json.loads(self.c.get_challenge(deed_id))
         self.assertEqual(info, {"name": "_namedeed.example.com", "type": "TXT",
-                                "value": deed_of(self.c, deed_id)["challenge_token"]})
+                                "value": deed_of(self.c, deed_id)["challenge_token"],
+                                "buyer_record": {"name": "_namedeed-buyer.example.com", "type": "TXT",
+                                                 "value_sha256": BUYER_HASH}})
 
 
 if __name__ == "__main__":
