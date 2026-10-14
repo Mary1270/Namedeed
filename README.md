@@ -6,21 +6,24 @@ Escrow and dispute resolution for the sale of a domain name, built as a single G
 
 1. The buyer opens a deed: domain, deadline, price, seller bond, and either the buyer's registrar ID (registrar transfer) or the nameservers the domain must move to.
 2. The seller accepts by posting the bond. The contract derives a challenge token for this deed.
-3. The seller publishes the token as a TXT record at `_namedeed.<domain>` and takes an observation. This proves control.
+3. The seller publishes the token as a TXT record at `_namedeed.<domain>` and takes an observation **before touching the domain**. This baseline proves control and that nothing had changed yet.
 4. The seller transfers the domain or changes its nameservers, then takes another observation.
 5. One gap after the latest observation, anyone issues the ruling. Either party may appeal; payouts are pulled with `withdraw`.
 
 ## What makes it hold up
 
 - **The handover is read from the registry, not from DNS zone data.** Transfer mode checks the sponsoring registrar's IANA ID in RDAP; delegation mode checks the registry delegation in RDAP. Neither party can fake these by editing a zone.
+- **A handover needs a baseline.** It only counts if an earlier observation shows the token while the handover is not yet in place. A domain that already matched the target at the first sighting is `UNDETERMINED` and both sides are refunded.
 - **The token proves control only.** After a switch the buyer runs the zone, so the handover never depends on a record the buyer could withhold.
 - **Two-observation stability rule.** A handover or a control proof counts only when seen in observations at least N hours apart. A ruling can only run one gap after the latest observation, so a change flashed for one observation never wins and nobody can rule before a fresh handover matures.
 - **Deterministic Tier 1.** The ruling is computed from the facts in code. No model, and no party-written text, influences it.
 - **Backstop.** `HANDOVER_COMPLETE` is impossible unless every structured check passes; anything the facts do not allow becomes `UNDETERMINED`.
-- **Bounded Tier 2.** A jury may only choose outcomes the frozen facts allow (for example, downgrade a completion over off-chain terms). Any departure from the code default must also pass a model plausibility check over the frozen facts. Tier 2 never re-fetches.
+- **Bounded Tier 2.** A jury may only choose outcomes the frozen facts allow (for example, downgrade a completion over off-chain terms; in transfer mode, find that the domain reached the buyer's registrar but not the buyer's account and choose a refund or a failure). Any departure from the code default must also pass a model plausibility check over the frozen facts. Tier 2 never re-fetches.
 - **Fair money.** Price and bond are separate amounts. Payouts follow the outcome and whether the buyer already holds the domain.
 - **Fair jury.** Jurors must be registered at least seven days before the deed was accepted. The pool is frozen at appeal and drawn from a future drand round; commits are bound to juror and deed.
 - **Never stuck.** Every state has a permissionless exit that pays out or refunds.
+- **Deposits are never stranded.** A payable call that is invalid does not revert. It returns `{"rejected": true, "reason": ..., "refund_wei": ...}` and credits the GEN back to the sender's balance.
+- **Payouts are reconciled.** `withdraw` records the payout as the single in-flight transfer. `reconcile_withdrawal` confirms it once the contract's balance shows it left, or, after seven days, returns it to the owner if it never did. The dApp reports a payment only after the wallet balance has risen.
 
 Outcomes: `HANDOVER_COMPLETE`, `PARTIAL_HANDOVER`, `HANDOVER_FAILED`, `UNDETERMINED`. See `ARCHITECTURE.md` for the data-control table, payout table, facts, recovery paths and disclosed limitations.
 
@@ -59,32 +62,36 @@ The rest of the suite covers input validation, parsers built against real RDAP a
 
 ## The dApp
 
-`index.html` uses `genlayer-js` from esm.sh and `createClient({ chain: studionet, account })`. Hash routes: `#/` (explore), `#/create`, `#/deed/<id>`, `#/jury`, `#/withdraw`. Set the contract address in `DEFAULT_CONTRACT` at the top of the script, or save it from the wallet sheet in the page (kept in that browser only).
+`index.html` uses `genlayer-js` from esm.sh and `createClient({ chain: studionet, account })` (with `provider: window.ethereum` for a browser wallet). Every action waits for finalization, checks the execution result and reads the contract back to confirm the expected change before reporting success. Hash routes: `#/` (explore), `#/create`, `#/deed/<id>`, `#/jury`, `#/withdraw`. Set the contract address in `DEFAULT_CONTRACT` at the top of the script, or save it from the wallet sheet in the page (kept in that browser only).
 
 ## Live deployment
 
-| Contract | Address |
+| Contract | Address | Status |
+| --- | --- | --- |
+| Production (`contract_deploy.py`) | [`0x970d3c629B79D6C05c5aC59db790b3aC75a9DB53`](https://explorer-studio.genlayer.com/address/0x970d3c629B79D6C05c5aC59db790b3aC75a9DB53) | current |
+| Short-window test (`contract_short_deploy.py`) | [`0x516b52F6aB1Eb9D397B71CB9CB3702Bd2456b092`](https://explorer-studio.genlayer.com/address/0x516b52F6aB1Eb9D397B71CB9CB3702Bd2456b092) | current |
+| First production deployment | [`0x3580ef2c572FdA4828531cE035318F7fEAD4131b`](https://explorer-studio.genlayer.com/address/0x3580ef2c572FdA4828531cE035318F7fEAD4131b) | superseded (no baseline rule) |
+| First short-window deployment | [`0x4C6Ae6369b8D38FFf2e70fd7518f5084736bFB4b`](https://explorer-studio.genlayer.com/address/0x4C6Ae6369b8D38FFf2e70fd7518f5084736bFB4b) | superseded (no baseline rule) |
+
+## Live tests of the current version
+
+All runs used separate Studio wallets for buyer, seller and five jurors on the short-window deployment `0x516b52F6aB1Eb9D397B71CB9CB3702Bd2456b092`, with real registry and DNS data for `google.com`.
+
+| Run | What it showed |
 | --- | --- |
-| Production (`contract_deploy.py`) | [`0x3580ef2c572FdA4828531cE035318F7fEAD4131b`](https://explorer-studio.genlayer.com/address/0x3580ef2c572FdA4828531cE035318F7fEAD4131b) |
-| Short-window test (`contract_short_deploy.py`) | [`0x4C6Ae6369b8D38FFf2e70fd7518f5084736bFB4b`](https://explorer-studio.genlayer.com/address/0x4C6Ae6369b8D38FFf2e70fd7518f5084736bFB4b) |
+| Invalid payments | A wrong seller bond and an invalid deed were accepted as normal calls, returned a reason, credited the full value to the sender and changed no deed state. The refunds were withdrawn and confirmed with `reconcile_withdrawal` |
+| No baseline (transfer mode) | `google.com` was already sponsored by registrar `292` and no control token was published. The old version paid the seller. This version ruled `UNDETERMINED` (`handover_unbaselined`) and both sides were refunded |
+| Delegation mode, failure | Nameservers unchanged and no handover: `HANDOVER_FAILED` with `failure_shown` |
+| Jury round | Five separate juror wallets were drawn. Three revealed `UNDETERMINED`, one `HANDOVER_FAILED`, one never revealed. The majority did not pass the plausibility gate (`verification_passed: false`), the code ruling stood, the appeal bond was returned and only the non-revealing juror was slashed (stake 1 to 0.85 GEN, reputation -3) |
+| Payouts | `withdraw` records the in-flight payout, `reconcile_withdrawal` returned `confirmed` only after the transfer left the contract. Final contract balance equalled the held ledger |
 
-## Live test on GenLayer Studio
+The production deployment `0x970d3c629B79D6C05c5aC59db790b3aC75a9DB53` was smoke-tested with real timings: an invalid deed and a wrong seller bond were refunded in full, a valid deed was created and cancelled, and every payout was withdrawn and confirmed with `reconcile_withdrawal` (final balance 0 GEN). A genuine seller-controlled domain transfer could not be demonstrated live because no test domain was available; that path is covered by the offline suite.
 
-A full lifecycle was run on the short-window contract with real registry and DNS data (`google.com`, transfer mode, buyer registrar IANA ID `292`). Every call reached validator consensus.
+## First live test (superseded version)
 
-| Step | Result |
-| --- | --- |
-| Five jurors register (1 GEN each) | Success |
-| `create_deed` (price 5 GEN) and `accept_deed` (bond 1 GEN) | Success |
-| `observe` by the seller | Real RDAP data frozen: registrar `292`, registry nameservers `ns1`–`ns4.google.com`. dns.google answered `NXDOMAIN` for the challenge name |
-| `issue_ruling` 60 seconds later | Two observations agree, so `complete_proven` is true. Deterministic ruling: `HANDOVER_COMPLETE` |
-| `contest` by the buyer (1 GEN bond) | Success |
-| `seat_panel` | Jury drawn from drand round `6548464`; `verify_jury_selection` replays it (`match: true`) |
-| `commit_vote` / `reveal_vote` | Four commits; two reveals in time. A late commit and late reveals were rejected by the contract windows |
-| `close_panel` | No majority (2 of 5), so the ruling stands, the appeal bond is refunded, and the three jurors who did not reveal are slashed 15% |
-| `withdraw` / `unstake_juror` | Seller 6 GEN, buyer 1 GEN, revealing jurors 0.225 GEN each; the contract balance returned to 0 |
+A full lifecycle was run on the first short-window deployment with real registry and DNS data (`google.com`, transfer mode, buyer registrar IANA ID `292`). Every call reached validator consensus. The run exercised funding, observation, the ruling, an appeal, the jury draw (replayed on chain), commit and reveal, slashing and withdrawals.
 
-Not exercised live (covered by the offline suite): a verified jury majority that departs from the ruling (the model plausibility check), the `HANDOVER_FAILED` and `PARTIAL_HANDOVER` outcomes, delegation mode, cancel and the expiry paths.
+It also exposed a flaw in that version: `google.com` was already sponsored by registrar `292` when the deed was opened, no control proof had been published, and the contract still ruled `HANDOVER_COMPLETE` and paid the seller. The current version requires a baseline observation before a handover can count, so the same data is now `UNDETERMINED` and refunds both sides (`test_domain_already_at_the_buyers_registrar_cannot_pay_the_seller`). Live runs of the current version are listed below once completed.
 
 ## License
 

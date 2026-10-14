@@ -314,12 +314,19 @@ def _facts(deed: dict, observations: list) -> dict:
     """Every structured check, computed in code from the ordered frozen
     observations (the last one is the resolve observation).
 
-    A handover counts once it is seen in consecutive observations spanning
-    at least `min_gap_seconds`. In delegation mode that run must reach the
-    final observation, because the seller still controls the registrar
-    account and a later revert is the seller's doing. In transfer mode any
-    such run counts, because after the transfer only the buyer can move the
-    domain again."""
+    BASELINE. A handover only counts when it is preceded by a baseline
+    observation: one that shows the challenge token (the seller controls the
+    zone) while the handover state is NOT yet in place. A domain whose
+    registry data already matched the target at the first sighting, with no
+    earlier control proof, never counts as handed over, because nothing
+    shows that anything changed after the deed was accepted.
+
+    STABILITY. A handover run counts once it is seen in consecutive
+    observations spanning at least `min_gap_seconds`. In delegation mode the
+    run must reach the final observation, because the seller still controls
+    the registrar account and a later revert is the seller's doing. In
+    transfer mode any such run counts, because after the transfer only the
+    buyer can move the domain again."""
     deadline = _parse_utc(deed["deadline"])
     gap = int(deed["min_gap_seconds"])
     times = [_parse_utc(o["taken_at"]) for o in observations]
@@ -328,6 +335,12 @@ def _facts(deed: dict, observations: list) -> dict:
     last = len(observations) - 1
     final = observations[last]["core"]
 
+    baseline = None
+    for index in range(len(observations)):
+        if tok[index] and not hand[index]:
+            baseline = index
+            break
+
     runs = []
     for index, held in enumerate(hand):
         if held and (index == 0 or not hand[index - 1]):
@@ -335,17 +348,24 @@ def _facts(deed: dict, observations: list) -> dict:
         elif held:
             runs[-1][1] = index
     transfer = deed["mode"] == MODE_TRANSFER
-    chosen = None
-    for start, end in runs:
-        if not transfer and end != last:
-            continue
-        if (times[end] - times[start]).total_seconds() >= gap:
-            chosen = (start, end)
-            break
+
+    def _mature(only_baselined: bool):
+        for start, end in runs:
+            if not transfer and end != last:
+                continue
+            if only_baselined and (baseline is None or start <= baseline):
+                continue
+            if (times[end] - times[start]).total_seconds() >= gap:
+                return (start, end)
+        return None
+
+    chosen_any = _mature(False)
+    chosen = _mature(True)
     run_mature = chosen is not None
+    unbaselined = bool(chosen_any is not None and chosen is None)
     complete = bool(run_mature and times[chosen[0]] <= deadline)
     late = bool(run_mature and times[chosen[0]] > deadline)
-    buyer_holds = bool(hand[last] or (transfer and run_mature))
+    buyer_holds = bool(hand[last] or (transfer and chosen_any is not None))
 
     control_in_time = False
     for i in range(len(observations)):
@@ -357,18 +377,21 @@ def _facts(deed: dict, observations: list) -> dict:
     answered = (not final["txt"]["err"]) and final["txt"]["status"] in DNS_ANSWERED
     registry_ok = (not final["rdap"]["err"]) and bool(final["rdap"]["name_ok"])
     ever = any(hand)
-    revert_blocks_failure = transfer and ever
+    revert_blocks_failure = transfer and chosen_any is not None
     failure = bool(past and answered and registry_ok and not hand[last] and not control_in_time
                    and not revert_blocks_failure)
     return {
         "mode": deed["mode"],
         "observations": len(observations),
+        "baseline_seen": baseline is not None,
+        "baseline_at": observations[baseline]["taken_at"] if baseline is not None else "",
         "handover_at_resolve": bool(hand[last]),
         "handover_ever": bool(ever),
         "buyer_holds": buyer_holds,
         "handover_since": observations[chosen[0]]["taken_at"] if run_mature else "",
         "handover_stable": bool(run_mature),
-        "handover_pending": bool(hand[last] and not run_mature),
+        "handover_unbaselined": unbaselined,
+        "handover_pending": bool(hand[last] and chosen_any is None),
         "complete_proven": complete,
         "late_handover": late,
         "control_in_time": bool(control_in_time),
@@ -378,11 +401,15 @@ def _facts(deed: dict, observations: list) -> dict:
 
 
 def _default_outcome(facts: dict) -> str:
-    """Tier 1 is deterministic: the facts alone decide the ruling."""
+    """Tier 1 is deterministic: the facts alone decide the ruling. A
+    handover with no baseline can never pay the seller in full: it is
+    UNDETERMINED, so both sides get their own money back."""
     if facts["complete_proven"]:
         return "HANDOVER_COMPLETE"
     if facts["late_handover"]:
         return "PARTIAL_HANDOVER"
+    if facts["handover_unbaselined"]:
+        return "UNDETERMINED"
     if facts["control_in_time"] and facts["past_deadline"]:
         return "PARTIAL_HANDOVER"
     if facts["failure_shown"]:
@@ -393,15 +420,24 @@ def _default_outcome(facts: dict) -> str:
 def _allowed_outcomes(facts: dict) -> list:
     """What a jury majority may choose. The code default is always allowed.
     A proven completion may be downgraded to PARTIAL_HANDOVER (for
-    off-chain terms the code cannot see). UNDETERMINED is allowed only while
-    the buyer does not already hold the domain. Nothing is ever allowed
-    above what the facts prove."""
+    off-chain terms the code cannot see). In transfer mode the registrar
+    match proves which registrar sponsors the domain, not whose account
+    holds it, so when the default pays the seller for a handover
+    (COMPLETE, or PARTIAL with the buyer holding) a jury may also find
+    that the buyer never received the domain and choose UNDETERMINED
+    (refund both) or HANDOVER_FAILED. UNDETERMINED is otherwise allowed only
+    while the buyer does not already hold the domain. Nothing is ever
+    allowed above what the facts prove."""
     default = _default_outcome(facts)
     allowed = {default}
     if default == "HANDOVER_COMPLETE":
         allowed.add("PARTIAL_HANDOVER")
     if not facts["buyer_holds"]:
         allowed.add("UNDETERMINED")
+    pays_seller = default == "HANDOVER_COMPLETE" or (default == "PARTIAL_HANDOVER" and facts["buyer_holds"])
+    if facts["mode"] == MODE_TRANSFER and pays_seller:
+        allowed.add("UNDETERMINED")
+        allowed.add("HANDOVER_FAILED")
     return [o for o in VALID_OUTCOMES if o in allowed]
 
 
@@ -422,6 +458,12 @@ def _explain(facts: dict, outcome: str) -> str:
         parts.append("Handover is visible but has not been held for the minimum gap.")
     else:
         parts.append("Handover is not in place at the final observation.")
+    if facts["handover_unbaselined"]:
+        parts.append("The handover was already in place before any control proof, so it cannot be shown to have happened after the deed was accepted.")
+    elif facts["baseline_seen"]:
+        parts.append(f"Baseline: token seen with no handover at {facts['baseline_at']}.")
+    else:
+        parts.append("No baseline observation (token seen with no handover yet).")
     parts.append("Control token seen twice in time." if facts["control_in_time"] else "Control token not seen twice in time.")
     parts.append("The deadline has passed." if facts["past_deadline"] else "The deadline has not passed.")
     parts.append(f"Outcome: {outcome}.")
@@ -483,7 +525,12 @@ class NameDeed(gl.Contract):
     The buyer escrows the PRICE when opening a deed and fixes the BOND the
     seller must post. The seller accepts by sending exactly the bond.
     Settlement only credits `pending_withdrawals`; `withdraw()` is the one
-    method that sends GEN out.
+    method that sends GEN out. A payable call that is invalid is never
+    reverted: it returns {"rejected": true, ...} and credits the GEN sent
+    back to the caller's withdrawable balance. A payout is tracked as the
+    single in-flight withdrawal until `reconcile_withdrawal` shows, from
+    the contract's own accounting, that it left (or, after seven days, that
+    it never did, and the amount returns to the owner).
 
     ANCHORS (on-chain before any dispute)
     Domain, record type (TXT), deadline, the buyer's nameserver set, the
@@ -503,6 +550,14 @@ class NameDeed(gl.Contract):
     DELEGATION mode: the RDAP `nameservers` (the registry delegation, not
     the zone's own NS records) equal the anchored set. Zone content, which
     either party may control, never decides a handover.
+
+    BASELINE
+    A handover counts only if an earlier observation shows the challenge
+    token (the seller controls the zone) while the handover is NOT yet in
+    place. A domain whose registry data already matched the target at the
+    first sighting, or whose control was never shown first, is UNDETERMINED
+    and both sides are refunded: nothing shows it changed hands after the
+    deed was accepted.
 
     STABILITY RULE
     A proof counts only when seen in separate observations at least
@@ -580,9 +635,17 @@ class NameDeed(gl.Contract):
     deed_count: u256
     jurors: TreeMap[str, str]
     pending_withdrawals: TreeMap[str, u256]
+    total_received: u256
+    confirmed_sent: u256
+    in_flight: str
+
+    RECONCILE_DELAY_SECONDS = 7 * 24 * 3600
 
     def __init__(self):
         self.deed_count = u256(0)
+        self.total_received = u256(0)
+        self.confirmed_sent = u256(0)
+        self.in_flight = ""
 
     @staticmethod
     def _now_utc() -> datetime.datetime:
@@ -616,6 +679,20 @@ class NameDeed(gl.Contract):
         key = self._address_key(address)
         current = self.pending_withdrawals.get(key, u256(0))
         self.pending_withdrawals[key] = u256(int(current) + int(amount))
+
+    def _received(self) -> None:
+        """Count GEN that arrived with a payable call. Together with
+        `confirmed_sent` this is the amount the contract must hold."""
+        self.total_received = u256(int(self.total_received) + int(gl.message.value))
+
+    def _reject(self, reason: str) -> str:
+        """Safe rejection of a payable call: nothing is changed except that
+        the GEN that came with it is credited to the sender's withdrawable
+        balance, so an invalid deposit can never be stranded."""
+        value = int(gl.message.value)
+        if value > 0:
+            self._credit(gl.message.sender_address, u256(value))
+        return json.dumps({"rejected": True, "reason": reason, "refund_wei": str(value)}, sort_keys=True)
 
     def _load(self, deed_id: str) -> dict:
         if deed_id not in self.deeds:
@@ -728,7 +805,31 @@ class NameDeed(gl.Contract):
         `nameservers` is the buyer's set; `evidence_hosts` is
         "dns.google,<rdap host>"; `buyer_registrar_id` is the buyer's IANA
         registrar ID for a registrar transfer, or "" for a delegation-only
-        handover; `min_gap_hours` is the stability gap."""
+        handover; `min_gap_hours` is the stability gap. An invalid call does
+        not revert: it returns {"rejected": true, ...} and credits the GEN
+        sent to the caller's withdrawable balance."""
+        self._received()
+        try:
+            return self._create_deed_checked(
+                seller, domain, deadline_iso, nameservers, evidence_hosts, handover_terms, seller_bond,
+                buyer_registrar_id, min_gap_hours,
+            )
+        except Exception as err:
+            return self._reject(str(err) or type(err).__name__)
+
+    def _create_deed_checked(
+        self,
+        seller: str,
+        domain: str,
+        deadline_iso: str,
+        nameservers: str,
+        evidence_hosts: str,
+        handover_terms: str,
+        seller_bond: str,
+        buyer_registrar_id: str,
+        min_gap_hours: int,
+    ) -> str:
+        """All validation runs before the first write."""
         buyer = self._address_to_str(gl.message.sender_address)
         price = int(gl.message.value)
         if price < int(self.MIN_STAKE) or price > self.MAX_AMOUNT:
@@ -817,7 +918,15 @@ class NameDeed(gl.Contract):
     @gl.public.write.payable
     def accept_deed(self, deed_id: str) -> str:
         """Only the named seller, before the deadline, sending exactly the
-        bond. Derives the challenge token."""
+        bond. Derives the challenge token. An invalid call is rejected
+        without reverting and the GEN sent is credited back."""
+        self._received()
+        try:
+            return self._accept_deed_checked(deed_id)
+        except Exception as err:
+            return self._reject(str(err) or type(err).__name__)
+
+    def _accept_deed_checked(self, deed_id: str) -> str:
         deed = self._load(deed_id)
         if deed["status"] != "proposed":
             raise gl.vm.UserError(f"Cannot accept deed in status '{deed['status']}'")
@@ -1025,7 +1134,16 @@ class NameDeed(gl.Contract):
     @gl.public.write.payable
     def register_juror(self) -> str:
         """Stake GEN to become (or top up) an eligible juror. Reputation
-        is untouched by staking - it only ever moves via case outcomes."""
+        is untouched by staking - it only ever moves via case outcomes. A
+        stake below the minimum is rejected without reverting and credited
+        back."""
+        self._received()
+        try:
+            return self._register_juror_checked()
+        except Exception as err:
+            return self._reject(str(err) or type(err).__name__)
+
+    def _register_juror_checked(self) -> str:
         amount = u256(gl.message.value)
         if amount < self.MIN_JUROR_STAKE:
             raise gl.vm.UserError(f"Must stake at least {int(self.MIN_JUROR_STAKE)} wei of GEN")
@@ -1073,7 +1191,15 @@ class NameDeed(gl.Contract):
         """Either party may appeal the ruling within the appeal window by
         posting a bond of clamp(price * 20%, MIN, MAX). The juror pool is
         frozen now and drawn after the window; the jury judges the frozen
-        observations only, never new evidence."""
+        observations only, never new evidence. An invalid appeal is
+        rejected without reverting and the bond is credited back."""
+        self._received()
+        try:
+            return self._contest_checked(deed_id)
+        except Exception as err:
+            return self._reject(str(err) or type(err).__name__)
+
+    def _contest_checked(self, deed_id: str) -> str:
         deed = self._load(deed_id)
         if deed["status"] != "ruled":
             raise gl.vm.UserError(f"Cannot appeal in status '{deed['status']}'")
@@ -1101,10 +1227,6 @@ class NameDeed(gl.Contract):
             key=lambda pair: (-pair[1], pair[0].lower()),
         )[: self.MAX_JURY_POOL]
         pool_snapshot = sorted(([a, str(w)] for a, w in weighted), key=lambda pair: pair[0].lower())
-        for addr, _w in pool_snapshot:
-            rec = self._load_juror(addr)
-            rec["pool_holds"] = int(rec.get("pool_holds", 0)) + 1
-            self._save_juror(addr, rec)
         draw_ts = int(self._parse_iso(deed["appeal_deadline"]).timestamp()) + 60
         deed["appeal"] = {
             "appellant": caller,
@@ -1114,6 +1236,13 @@ class NameDeed(gl.Contract):
             "eligible_pool": pool_snapshot,
         }
         deed["status"] = "contested"
+        held = []
+        for addr, _w in pool_snapshot:
+            rec = self._load_juror(addr)
+            rec["pool_holds"] = int(rec.get("pool_holds", 0)) + 1
+            held.append((addr, rec))
+        for addr, rec in held:
+            self._save_juror(addr, rec)
         self._save(deed_id, deed)
         return self.deeds[deed_id]
 
@@ -1561,22 +1690,69 @@ class NameDeed(gl.Contract):
 
         return pool
 
+    def _try_reconcile(self) -> str:
+        """Settle the one payout that may still be in flight, from the
+        contract's own accounting. The contract must hold exactly
+        `total_received - confirmed_sent`. If its balance has dropped by the
+        payout amount the transfer left, so it is confirmed. If the balance
+        still covers everything and RECONCILE_DELAY_SECONDS have passed, the
+        transfer demonstrably never left and the amount returns to the
+        recipient's withdrawable balance."""
+        raw = self.in_flight
+        if not raw:
+            return "none"
+        rec = json.loads(raw)
+        amount = int(rec["amount"])
+        held = int(self.total_received) - int(self.confirmed_sent)
+        balance = int(self.balance)
+        if balance <= held - amount:
+            self.confirmed_sent = u256(int(self.confirmed_sent) + amount)
+            self.in_flight = ""
+            return "confirmed"
+        if balance >= held:
+            age = (self._now_utc() - self._parse_iso(rec["at"])).total_seconds()
+            if age >= self.RECONCILE_DELAY_SECONDS:
+                self._credit(rec["to"], u256(amount))
+                self.in_flight = ""
+                return "restored"
+            return "waiting"
+        return "inconsistent"
+
     @gl.public.write
     def withdraw(self) -> str:
-        """Identical pattern to TrueStake: zero the ledger BEFORE the
-        external transfer (checks-effects-interactions), so this is
-        re-entrancy-safe by construction."""
+        """Checks-effects-interactions: the ledger is zeroed before the
+        transfer, and the payout is recorded as the single in-flight
+        withdrawal. A new withdrawal first settles the previous one
+        (`_try_reconcile`) and is refused while it is still unconfirmed.
+        Anyone can settle it with `reconcile_withdrawal`."""
         caller_str = self._address_to_str(gl.message.sender_address)
         key = self._address_key(caller_str)
 
+        self._try_reconcile()
+        if self.in_flight:
+            raise gl.vm.UserError("Another payout is still settling. Call reconcile_withdrawal, then try again.")
         if key not in self.pending_withdrawals or self.pending_withdrawals[key] == u256(0):
             raise gl.vm.UserError("You have no withdrawable GEN balance on this contract.")
 
         amount = self.pending_withdrawals[key]
         self.pending_withdrawals[key] = u256(0)
+        self.in_flight = json.dumps(
+            {"to": caller_str, "amount": str(int(amount)), "at": self._now_utc().isoformat()}, sort_keys=True
+        )
         _Payee(Address(caller_str)).emit_transfer(value=amount)
         return f"Withdrew {int(amount)} wei of GEN to {caller_str}."
 
+    @gl.public.write
+    def reconcile_withdrawal(self) -> str:
+        """Permissionless. Returns "confirmed" once the in-flight transfer
+        has provably left the contract, "restored" if it never left and the
+        delay has passed (the amount is credited back), or "waiting"."""
+        if not self.in_flight:
+            raise gl.vm.UserError("No payout is awaiting confirmation")
+        status = self._try_reconcile()
+        if status == "inconsistent":
+            raise gl.vm.UserError("The contract balance does not match its accounting; try again later")
+        return status
 
     @staticmethod
     def _summary(deed: dict) -> dict:
@@ -1665,6 +1841,18 @@ class NameDeed(gl.Contract):
     @gl.public.view
     def get_contract_balance(self) -> str:
         return str(int(self.balance))
+
+    @gl.public.view
+    def get_withdrawal_status(self) -> str:
+        """The in-flight payout (if any) and the accounting behind it."""
+        return json.dumps(
+            {
+                "in_flight": json.loads(self.in_flight) if self.in_flight else None,
+                "held": str(int(self.total_received) - int(self.confirmed_sent)),
+                "balance": str(int(self.balance)),
+            },
+            sort_keys=True,
+        )
 
     @gl.public.view
     def verify_jury_selection(self, deed_id: str) -> str:

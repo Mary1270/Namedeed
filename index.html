@@ -159,11 +159,19 @@ nav.tabs a.active{color:var(--signal);box-shadow:inset 0 3px 0 var(--signal)}
     <p class="hint">Payouts, refunds and rewards are credited here. Nothing is sent until you withdraw.</p>
     <div class="card">
       <div class="row"><span>Your withdrawable balance</span><b id="myPending">connect wallet</b></div>
+      <div class="row" style="margin-top:6px"><span>Your wallet balance</span><b id="myWallet">connect wallet</b></div>
       <div style="margin-top:12px" class="row">
         <button id="withdrawBtn" type="button">Withdraw</button>
         <button id="checkPendingBtn" class="ghost" type="button">Refresh</button>
       </div>
       <div id="wOut" class="out"></div>
+    </div>
+    <div class="card">
+      <h3>Payout status</h3>
+      <p class="hint">A withdrawal is only reported as paid after your wallet balance has risen. If a transfer never reaches the wallet, anyone can reconcile it after 7 days and the amount returns to the owner's balance.</p>
+      <div id="payStatus" class="hint">—</div>
+      <div style="margin-top:10px"><button id="reconcileBtn" class="ghost" type="button">Check payout</button></div>
+      <div id="pOut" class="out"></div>
     </div>
     <div class="card">
       <h3>Check another address</h3>
@@ -212,7 +220,7 @@ nav.tabs a.active{color:var(--signal);box-shadow:inset 0 3px 0 var(--signal)}
 import { createClient, createAccount } from "https://esm.sh/genlayer-js@latest";
 import { studionet } from "https://esm.sh/genlayer-js@latest/chains";
 
-const DEFAULT_CONTRACT = "0x3580ef2c572FdA4828531cE035318F7fEAD4131b";
+const DEFAULT_CONTRACT = "0x970d3c629B79D6C05c5aC59db790b3aC75a9DB53";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 let CONTRACT_ADDRESS = DEFAULT_CONTRACT;
 try { const saved = localStorage.getItem("namedeed:contract"); if (/^0x[0-9a-fA-F]{40}$/.test(saved || "")) CONTRACT_ADDRESS = saved; } catch (e) {}
@@ -298,7 +306,7 @@ async function connectInjected() {
   try {
     const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
     account = accounts[0];
-    client = createClient({ chain: studionet, account });
+    client = createClient({ chain: studionet, account, provider: window.ethereum });
     usingInjected = true;
     try { await ensureChain(); } catch (e) { showOut(out, "Connected, but the wallet could not switch to GenLayer Studio: " + (e?.message || e), "err"); }
     connected(short(account));
@@ -367,7 +375,11 @@ async function readJson(functionName, args = []) {
   const raw = await read(functionName, args);
   return typeof raw === "string" ? JSON.parse(raw) : raw;
 }
-async function write(out, label, functionName, args, valueWei) {
+const EXEC_OK = new Set(["FINISHED_WITH_RETURN", "SUCCESS"]);
+function execName(receipt) {
+  return receipt?.txExecutionResultName ?? receipt?.consensus_data?.leader_receipt?.[0]?.execution_result ?? null;
+}
+async function write(out, label, functionName, args, valueWei, verify) {
   if (!needClient(out)) return null;
   try {
     showOut(out, `Sending ${label}. Confirm the request in your wallet.`);
@@ -375,13 +387,43 @@ async function write(out, label, functionName, args, valueWei) {
     const hash = await client.writeContract({ address: CONTRACT_ADDRESS, functionName, args, value: valueWei ?? 0n });
     showOut(out, `Sent ${short(hash)}. Waiting for validators to finalize…`);
     const receipt = await client.waitForTransactionReceipt({ hash, status: "FINALIZED", interval: 4000, retries: 60 });
-    const failed = receipt?.consensus_data?.leader_receipt?.[0]?.execution_result === "ERROR";
-    if (failed) { showOut(out, "The contract rejected this call. Check the status and your wallet, then try again.\n\nTx: " + hash, "err"); return null; }
-    showOut(out, "Done.\n\nTx: " + hash, "ok");
+    const exec = execName(receipt);
+    if (!EXEC_OK.has(exec)) {
+      showOut(out, `The call did not execute successfully (${exec || "no execution result"}). Nothing was changed. Check the status and your wallet, then try again.\n\nTx: ${hash}`, "err");
+      return null;
+    }
     const result = unwrap(receipt);
+    if (result && typeof result === "object" && result.rejected === true) {
+      const back = BigInt(result.refund_wei || "0");
+      showOut(out, `The contract refused this call: ${result.reason}\n\n${back > 0n ? `Your ${weiToGen(back)} GEN was not used. It is credited to your balance: open Balance and withdraw it.` : "Nothing was sent."}\n\nTx: ${hash}`, "err");
+      return null;
+    }
+    if (verify) {
+      let check = { ok: true };
+      try { check = await verify(result); } catch (e) { check = { ok: false, note: "could not read the state back (" + (e?.message || e) + ")" }; }
+      if (!check.ok) {
+        showOut(out, `The transaction finalized, but the expected change is not visible on the contract yet: ${check.note}. Refresh the page and check before repeating the step.\n\nTx: ${hash}`, "err");
+        return null;
+      }
+    }
+    showOut(out, "Done. The change is confirmed on the contract.\n\nTx: " + hash, "ok");
     return result === null ? true : result;
   } catch (e) { showOut(out, "Error: " + (e?.message || String(e)), "err"); return null; }
 }
+const sameAddr = (a, b) => String(a || "").toLowerCase() === String(b || "").toLowerCase();
+const expectStatus = (id, ...statuses) => async () => {
+  const d = await readJson("get_deed", [id]);
+  return { ok: statuses.includes(d.status), note: `status is "${d.status}", expected ${statuses.join(" or ")}` };
+};
+const expectObserved = (id, before) => async () => {
+  const d = await readJson("get_deed", [id]);
+  return { ok: d.observations.length > before, note: `${d.observations.length} observations recorded, expected more than ${before}` };
+};
+const expectVote = (id, field) => async () => {
+  const d = await readJson("get_deed", [id]);
+  const has = Object.keys(d.jury?.[field] || {}).some((k) => sameAddr(k, account));
+  return { ok: has, note: `no ${field.slice(0, -1)} from your address is recorded` };
+};
 
 /* ---------- labels ---------- */
 const STATUS_LABEL = {
@@ -461,7 +503,12 @@ $("createBtn").addEventListener("click", async () => {
   if (lead <= 0 || lead > 29.9 * 24) return showOut(out, "The deadline must be in the future and less than 30 days away.", "err");
   if (!Number.isInteger(gap) || gap < 1 || gap > 72) return showOut(out, "Hours between observations must be 1 to 72.", "err");
   const id = await write(out, "create_deed", "create_deed",
-    [v("fSeller"), v("fDomain"), deadline.toISOString(), v("fNs"), `dns.google,${$("fRdap").value}`, v("fTerms"), bond.toString(), registrar, gap], stake);
+    [v("fSeller"), v("fDomain"), deadline.toISOString(), v("fNs"), `dns.google,${$("fRdap").value}`, v("fTerms"), bond.toString(), registrar, gap], stake,
+    async (newId) => {
+      if (typeof newId !== "string") return { ok: false, note: "no deed id was returned" };
+      const d = await readJson("get_deed", [newId]);
+      return { ok: sameAddr(d.buyer, account) && d.status === "proposed" && String(d.price) === stake.toString(), note: "the deed is not stored as expected" };
+    });
   if (id && typeof id === "string") location.hash = `#/deed/${id}`;
 });
 
@@ -498,6 +545,7 @@ function copyButton(text) {
 }
 const FACT_LABELS = [
   ["handover_stable", "Handover held for the gap"], ["complete_proven", "Handover proven in time"],
+  ["baseline_seen", "Baseline: token seen before the handover"], ["handover_unbaselined", "Handover already in place at first sight"],
   ["buyer_holds", "Buyer holds the domain"], ["control_in_time", "Control token seen twice in time"],
   ["handover_pending", "Handover not yet stable"], ["past_deadline", "Deadline passed"],
 ];
@@ -543,9 +591,9 @@ async function renderDeed(id) {
       copyButton(d.challenge_token)));
     view.appendChild(h("div", { class: "card" }, h("h3", { text: "How the seller proves the handover" }),
       h("ol", { class: "hint", style: "margin:0;padding-left:20px" },
-        h("li", { text: "Publish the record above, then take an observation. This proves you control the domain." }),
+        h("li", { text: "Publish the record above, then take an observation BEFORE you move the domain. This baseline shows that you control it and that nothing had changed yet. A handover with no baseline is never paid: both sides are refunded." }),
         h("li", { text: d.mode === "transfer" ? `Transfer the domain to the buyer's registrar (IANA ID ${d.registrar_id}).` : `Change the domain's nameservers at your registrar to: ${d.nameservers.join(", ")}.` }),
-        h("li", { text: "Take another observation once the registry shows the change." }),
+        h("li", { text: "Take another observation once the registry shows the change, so it is seen in two observations a full gap apart." }),
         h("li", { text: `Wait ${fmtDuration(Number(d.min_gap_seconds) * 1000)}, then issue the ruling. Do all of this before ${fmtTime(d.deadline)}.` }))));
   }
 
@@ -581,19 +629,19 @@ async function renderDeed(id) {
   const wrong = (role, addr) => account ? `You are connected as ${short(account)}. Switch to ${short(addr)} (${role}) for this step.` : "Connect the " + role + " wallet first.";
 
   if (st === "proposed") {
-    const [b1, o1] = actionButton(`Accept and post ${weiToGen(d.seller_bond)} GEN bond`, "", (out) => write(out, "accept_deed", "accept_deed", [d.deed_id], BigInt(d.seller_bond)));
+    const [b1, o1] = actionButton(`Accept and post ${weiToGen(d.seller_bond)} GEN bond`, "", (out) => write(out, "accept_deed", "accept_deed", [d.deed_id], BigInt(d.seller_bond), expectStatus(d.deed_id, "active")));
     acts.appendChild(actionCard("Accept this deed", isSeller ? "Only the named seller can accept, posting exactly the bond. Accepting creates your challenge value." : wrong("seller", d.seller), b1, o1));
-    const [b2, o2] = actionButton("Cancel and refund", "danger", (out) => write(out, "cancel_deed", "cancel_deed", [d.deed_id]));
+    const [b2, o2] = actionButton("Cancel and refund", "danger", (out) => write(out, "cancel_deed", "cancel_deed", [d.deed_id], 0n, expectStatus(d.deed_id, "cancelled")));
     acts.appendChild(actionCard("Cancel", isBuyer ? "Only the buyer can cancel, and only before acceptance." : wrong("buyer", d.buyer), b2, o2));
   }
   if (st === "active" || st === "observing") {
     const counts = d.observation_counts || {};
     const mine = isBuyer ? counts.buyer || 0 : isSeller ? counts.seller || 0 : 0;
-    const [b, o2] = actionButton("Take an observation", "", (out) => write(out, "observe", "observe", [d.deed_id]));
+    const [b, o2] = actionButton("Take an observation", "", (out) => write(out, "observe", "observe", [d.deed_id], 0n, expectObserved(d.deed_id, d.observations.length)));
     acts.appendChild(actionCard("Observe",
       isParty ? `Validators read the challenge record and the registry and freeze the result. You have used ${mine} of 3. Open until ${fmtTime(d.evidence_deadline)}.` : "Only the buyer or the seller can take observations.", b, o2));
     if (st === "active" && isPast(d.evidence_deadline)) {
-      const [be, oe] = actionButton("Close deed and refund both", "secondary", (out) => write(out, "expire_unobserved", "expire_unobserved", [d.deed_id]));
+      const [be, oe] = actionButton("Close deed and refund both", "secondary", (out) => write(out, "expire_unobserved", "expire_unobserved", [d.deed_id], 0n, expectStatus(d.deed_id, "closed")));
       acts.appendChild(actionCard("Evidence window closed", "Nobody took an observation. Anyone can close the deed; price and bond are refunded.", be, oe));
     }
   }
@@ -601,13 +649,13 @@ async function renderDeed(id) {
     const last = d.observations[d.observations.length - 1];
     const readyAt = ts(last.taken_at) + gapMs;
     const wait = readyAt - Date.now();
-    const [b, o2] = actionButton("Issue the ruling", "", (out) => write(out, "issue_ruling", "issue_ruling", [d.deed_id]));
+    const [b, o2] = actionButton("Issue the ruling", "", (out) => write(out, "issue_ruling", "issue_ruling", [d.deed_id], 0n, expectStatus(d.deed_id, "ruled")));
     acts.appendChild(actionCard("Issue the ruling",
       wait > 0 ? `Opens in ${fmtDuration(wait)} (${fmtTime(new Date(readyAt).toISOString())}), one gap after the latest observation.`
                : "Anyone can run this. Before the deadline only a proven completion is recorded, and a handover that is not yet stable has to be observed and given the full gap first.", b, o2));
     const base = Math.max(readyAt, ts(d.evidence_deadline)) + 7 * 86400000;
     if (Date.now() > base) {
-      const [bx, ox] = actionButton("Close deed and refund both", "secondary", (out) => write(out, "expire_unruled", "expire_unruled", [d.deed_id]));
+      const [bx, ox] = actionButton("Close deed and refund both", "secondary", (out) => write(out, "expire_unruled", "expire_unruled", [d.deed_id], 0n, expectStatus(d.deed_id, "closed")));
       acts.appendChild(actionCard("Ruling timed out", "No ruling within 7 days. Anyone can close the deed; price and bond are refunded.", bx, ox));
     }
   }
@@ -616,16 +664,16 @@ async function renderDeed(id) {
     acts.appendChild(note);
     read("count_eligible_jurors", [d.deed_id]).then((n) => { const c = Number(n); note.textContent = c >= 5 ? `${c} eligible jurors (5 needed).` : `Only ${c} eligible jurors. An appeal needs 5, so it would fail right now.`; }).catch(() => { note.textContent = ""; });
     const bond = bondWei(d.price);
-    const [b, o2] = actionButton(`Appeal with ${weiToGen(bond)} GEN bond`, "secondary", (out) => write(out, "contest", "contest", [d.deed_id], bond));
+    const [b, o2] = actionButton(`Appeal with ${weiToGen(bond)} GEN bond`, "secondary", (out) => write(out, "contest", "contest", [d.deed_id], bond, expectStatus(d.deed_id, "contested")));
     acts.appendChild(actionCard("Appeal", isParty ? `Before ${fmtTime(d.appeal_deadline)}. The jury can only choose an outcome the frozen observations allow, and a change from this ruling must also pass a check against the terms.` : "Only the buyer or the seller can appeal.", b, o2));
-    const [b3, o3] = actionButton("Close without appeal", "", (out) => write(out, "close_uncontested", "close_uncontested", [d.deed_id]));
+    const [b3, o3] = actionButton("Close without appeal", "", (out) => write(out, "close_uncontested", "close_uncontested", [d.deed_id], 0n, expectStatus(d.deed_id, "closed")));
     acts.appendChild(actionCard("Settle", isPast(d.appeal_deadline) ? "The appeal window has closed. Anyone can settle." : `Available after ${fmtTime(d.appeal_deadline)}.`, b3, o3));
   }
   if (st === "contested") {
-    const [bd, od] = actionButton("Seat the jury", "", (out) => write(out, "seat_panel", "seat_panel", [d.deed_id]));
+    const [bd, od] = actionButton("Seat the jury", "", (out) => write(out, "seat_panel", "seat_panel", [d.deed_id], 0n, expectStatus(d.deed_id, "paneled")));
     acts.appendChild(actionCard("Seat the jury", isPast(d.appeal_deadline) ? "Anyone can do this now. The draw uses a randomness round published after the window." : `Available after ${fmtTime(d.appeal_deadline)}.`, bd, od));
     if (Date.now() > ts(d.appeal_deadline) + 7 * 86400000) {
-      const [bs, os] = actionButton("Recover stuck appeal", "secondary", (out) => write(out, "expire_stuck_appeal", "expire_stuck_appeal", [d.deed_id]));
+      const [bs, os] = actionButton("Recover stuck appeal", "secondary", (out) => write(out, "expire_stuck_appeal", "expire_stuck_appeal", [d.deed_id], 0n, expectStatus(d.deed_id, "closed")));
       acts.appendChild(actionCard("Appeal stuck", "The jury could not be seated within 7 days. The ruling stands and the bond is refunded.", bs, os));
     }
   }
@@ -638,18 +686,18 @@ async function renderDeed(id) {
       const s = salt.value.trim() || randomSalt(); salt.value = s; saveVote(d.deed_id, sel.value, s);
       if (!needClient(out)) return null;
       const hash = await sha256Hex(`${sel.value}:${s}:${String(account).toLowerCase()}:${d.deed_id}`);
-      return write(out, "commit_vote", "commit_vote", [d.deed_id, hash]);
+      return write(out, "commit_vote", "commit_vote", [d.deed_id, hash], 0n, expectVote(d.deed_id, "commits"));
     });
     acts.appendChild(actionCard("Commit a vote", `Selected jurors only, until ${fmtTime(j.commit_deadline)}. Your vote and salt are kept in this browser for the reveal.`, h("label", { text: "Vote" }), sel, h("label", { text: "Salt (made for you if empty)" }), salt, bc, oc));
     const rSel = h("select", null, OUTCOMES.map((x) => h("option", { value: x, text: x })));
     const rSalt = h("input", { placeholder: "same salt", value: saved?.salt || "", autocapitalize: "off", spellcheck: "false" });
     if (saved?.vote) rSel.value = saved.vote;
-    const [br, or2] = actionButton("Reveal vote", "secondary", (out) => write(out, "reveal_vote", "reveal_vote", [d.deed_id, rSel.value, rSalt.value.trim()]));
+    const [br, or2] = actionButton("Reveal vote", "secondary", (out) => write(out, "reveal_vote", "reveal_vote", [d.deed_id, rSel.value, rSalt.value.trim()], 0n, expectVote(d.deed_id, "reveals")));
     acts.appendChild(actionCard("Reveal your vote", `Opens ${fmtTime(j.commit_deadline)}, closes ${fmtTime(j.reveal_deadline)}. Must match the commit.`, h("label", { text: "Vote" }), rSel, h("label", { text: "Salt" }), rSalt, br, or2));
-    const [bf, of2] = actionButton("Close the jury round", "", (out) => write(out, "close_panel", "close_panel", [d.deed_id]));
+    const [bf, of2] = actionButton("Close the jury round", "", (out) => write(out, "close_panel", "close_panel", [d.deed_id], 0n, expectStatus(d.deed_id, "closed")));
     acts.appendChild(actionCard("Close the round", isPast(j.reveal_deadline) ? "Anyone can close it now." : `Available after ${fmtTime(j.reveal_deadline)}.`, bf, of2));
     if (Date.now() > ts(j.reveal_deadline) + 7 * 86400000) {
-      const [bs, os] = actionButton("Recover stuck appeal", "secondary", (out) => write(out, "expire_stuck_appeal", "expire_stuck_appeal", [d.deed_id]));
+      const [bs, os] = actionButton("Recover stuck appeal", "secondary", (out) => write(out, "expire_stuck_appeal", "expire_stuck_appeal", [d.deed_id], 0n, expectStatus(d.deed_id, "closed")));
       acts.appendChild(actionCard("Appeal stuck", "The round could not close within 7 days. The ruling stands, the bond is refunded and jurors are unlocked.", bs, os));
     }
   }
@@ -664,12 +712,20 @@ async function renderDeed(id) {
 $("jRegisterBtn").addEventListener("click", async () => {
   const out = $("jOut"), wei = genToWei($("jStake").value);
   if (wei === null || wei <= 0n) return showOut(out, "Enter a positive stake in GEN.", "err");
-  await write(out, "register_juror", "register_juror", [], wei);
+  const before = await readJson("get_juror", [account]).then((j) => BigInt(j.stake || "0")).catch(() => 0n);
+  await write(out, "register_juror", "register_juror", [], wei, async () => {
+    const j = await readJson("get_juror", [account]);
+    return { ok: BigInt(j.stake) === before + wei, note: `your stake is ${weiToGen(j.stake)} GEN, expected ${weiToGen(before + wei)}` };
+  });
 });
 $("jUnstakeBtn").addEventListener("click", async () => {
   const out = $("jOut"), wei = genToWei($("jUnstake").value);
   if (wei === null || wei <= 0n) return showOut(out, "Enter a positive amount in GEN.", "err");
-  await write(out, "unstake_juror", "unstake_juror", [wei.toString()]);
+  const before = await readJson("get_juror", [account]).then((j) => BigInt(j.stake || "0")).catch(() => 0n);
+  await write(out, "unstake_juror", "unstake_juror", [wei.toString()], 0n, async () => {
+    const j = await readJson("get_juror", [account]);
+    return { ok: BigInt(j.stake) === before - wei, note: `your stake is ${weiToGen(j.stake)} GEN, expected ${weiToGen(before - wei)}` };
+  });
 });
 $("jLookupBtn").addEventListener("click", async () => {
   const out = $("jLookupOut"), addr = $("jAddr").value.trim() || account;
@@ -679,15 +735,81 @@ $("jLookupBtn").addEventListener("click", async () => {
 });
 
 /* ---------- Balance ---------- */
+const rpcUrl = () => studionet.rpcUrls?.default?.http?.[0];
+async function chainBalance(addr) {
+  const url = rpcUrl();
+  if (!url || !addr) return null;
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getBalance", params: [addr, "latest"] }) });
+  const body = await res.json();
+  if (body.error || typeof body.result !== "string") throw new Error(body.error?.message || "no balance returned");
+  return BigInt(body.result);
+}
+async function refreshWallet() {
+  if (!account) { $("myWallet").textContent = "connect wallet"; return null; }
+  try { const v = await chainBalance(account); $("myWallet").textContent = weiToGen(v) + " GEN"; return v; }
+  catch (e) { $("myWallet").textContent = "—"; return null; }
+}
 async function refreshPending() {
   if (!account) { $("myPending").textContent = "connect wallet"; return; }
   try { $("myPending").textContent = weiToGen(await read("get_pending_withdrawal", [account])) + " GEN"; } catch (e) { $("myPending").textContent = "—"; }
+  refreshWallet();
+  refreshPayStatus();
 }
 async function refreshBalance() {
   try { $("contractBal").textContent = weiToGen(await read("get_contract_balance")) + " GEN"; } catch (e) { $("contractBal").textContent = "—"; }
 }
+async function refreshPayStatus() {
+  try {
+    const st = await readJson("get_withdrawal_status");
+    $("payStatus").textContent = st.in_flight
+      ? `A payout of ${weiToGen(st.in_flight.amount)} GEN to ${short(st.in_flight.to)} is waiting for confirmation (sent ${fmtTime(st.in_flight.at)}).`
+      : "No payout is waiting for confirmation.";
+    return st;
+  } catch (e) { $("payStatus").textContent = "—"; return null; }
+}
+async function reconcilePayout(out) {
+  const result = await write(out, "reconcile_withdrawal", "reconcile_withdrawal", []);
+  await refreshPayStatus();
+  return result;
+}
 $("checkPendingBtn").addEventListener("click", refreshPending);
-$("withdrawBtn").addEventListener("click", async () => { const r = await write($("wOut"), "withdraw", "withdraw", []); if (r) refreshPending(); });
+$("reconcileBtn").addEventListener("click", async () => {
+  const out = $("pOut");
+  const st = await refreshPayStatus();
+  if (!st?.in_flight) return showOut(out, "No payout is waiting for confirmation.", "ok");
+  const r = await reconcilePayout(out);
+  if (r === "confirmed") showOut(out, "Confirmed: the transfer has left the contract.", "ok");
+  else if (r === "restored") showOut(out, "The transfer never left the contract. The amount is back on its owner's balance.", "ok");
+  else if (r === "waiting") showOut(out, "Not confirmed yet. The funds are still held by the contract and tracked; check again later.");
+  refreshPending();
+});
+$("withdrawBtn").addEventListener("click", async () => {
+  const out = $("wOut");
+  if (!needClient(out) || !needContract(out)) return;
+  let before = null, owed = 0n;
+  try { before = await chainBalance(account); } catch (e) {}
+  try { owed = BigInt(await read("get_pending_withdrawal", [account])); } catch (e) {}
+  const r = await write(out, "withdraw", "withdraw", [], 0n, async () => {
+    const left = BigInt(await read("get_pending_withdrawal", [account]));
+    return { ok: left === 0n, note: `your withdrawable balance is still ${weiToGen(left)} GEN` };
+  });
+  if (!r) return refreshPending();
+  if (before === null) { showOut(out, "Withdrawal recorded on the contract. Your wallet balance could not be read here, so the payment is not confirmed yet. Use Check payout.", "ok"); return refreshPending(); }
+  showOut(out, "Withdrawal recorded. Waiting for the transfer to reach your wallet…");
+  for (let i = 0; i < 20; i++) {
+    await new Promise((res) => setTimeout(res, 3000));
+    let now = null;
+    try { now = await chainBalance(account); } catch (e) {}
+    if (now !== null && now >= before + owed) {
+      showOut(out, `Payment confirmed. Your wallet balance rose from ${weiToGen(before)} to ${weiToGen(now)} GEN.`, "ok");
+      try { await write($("pOut"), "reconcile_withdrawal", "reconcile_withdrawal", []); } catch (e) {}
+      return refreshPending();
+    }
+  }
+  showOut(out, "Withdrawal recorded, but the transfer has not reached your wallet yet. Nothing is lost: the contract still tracks it. Use Check payout in a few minutes.", "err");
+  refreshPending();
+});
 $("wLookupBtn").addEventListener("click", async () => {
   const out = $("wLookupOut"), addr = $("wAddr").value.trim();
   if (!addr) return showOut(out, "Enter an address.", "err");
