@@ -102,6 +102,22 @@ All runs below used the synthetic-evidence contract `0xa6eA661aDCBF7048F5C657472
 | Payout reconciliation | After the three deeds the contract held 29 GEN: 8 GEN withdrawable by the buyer, 16 GEN by the seller and 5 GEN of juror stakes, which is exactly the contract balance |
 | A mistaken call | One `create_deed` was sent from a juror wallet by mistake, which made that wallet the buyer of `deed_1` and left only four eligible jurors for that deed. The deed was completed without an appeal and a fresh deed (`deed_2`) was used for the jury run |
 
+### Real RDAP and DNS data on the current code
+
+Run on the short-window contract `0x01e28EE920197C7B7413991d4Ef5c0b3B57907a6` (the production logic with minute-scale windows), domain `google.com`, `deed_0`. The agreed nameservers were `ns1.example.net` and `ns2.example.net`. RDAP returned `ns1`..`ns4.google.com` and no token was served, so nothing was shown and no transfer is claimed. The ruling was `HANDOVER_FAILED` and the buyer received price plus bond (2 GEN); the contract balance returned to 0.
+
+| Step | Method | Transaction |
+| --- | --- | --- |
+| Open | `create_deed` | `0x6f47782e...02ef9ace` |
+| Accept | `accept_deed` | `0xde78331e...5c670a65` |
+| Observe (real RDAP/DNS) | `observe` | `0x577661d1...81478d5a` |
+| Ruling | `issue_ruling` | `0x01ea223f...9a543cdc` |
+| Close | `close_uncontested` | `0x88aa8cf8...6dad9e6e` |
+| Withdraw | `withdraw` | `0x7edf6395...5dbf453e` |
+| Confirm payout | `reconcile_withdrawal` | `0x4569342d...f7907325` |
+
+Transaction hashes are shortened as shown in the Studio explorer; open the contract page and match by prefix.
+
 Earlier runs of the previous version (jury round with a rejected majority and a non-revealing juror, invalid payments refunded, no-baseline `UNDETERMINED` with real `google.com` data) are described in the history of this repository; they ran on superseded contracts.
 
 ## What is real and what is not
